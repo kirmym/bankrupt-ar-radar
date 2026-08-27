@@ -16,15 +16,17 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Сначала зависимости (кэшируемый слой)
+# Код нужен ДО pip install: hatchling собирает wheel из src/
 COPY backend/pyproject.toml ./
+COPY backend/src ./src
 RUN pip install --no-cache-dir .
 
-# Код backend
-COPY backend/ .
+# Остальное (миграции, тесты)
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./
+COPY backend/tests ./tests
 
 # Собранный фронтенд внутрь backend-контейнера
 COPY --from=webbuilder /web/dist /app/web/dist

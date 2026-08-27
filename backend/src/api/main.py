@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.api.diagnostics import router as diagnostics_router
 from src.config import get_settings
 from src.database import get_db
 from src.models.entities import Claim, Lot, Trade, UserFeedback
@@ -63,6 +64,9 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
     return HealthResponse(version="0.1.0")
+
+
+app.include_router(diagnostics_router, prefix="/api/v1", tags=["diagnostics"])
 
 
 # ── Лоты ─────────────────────────────────────────────────────────────────────
