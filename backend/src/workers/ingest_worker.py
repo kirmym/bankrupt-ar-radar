@@ -2,31 +2,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from selectolax.parser import HTMLParser
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.config import get_settings
-from src.connectors.efrsb import (
-    EFRSB_BASE,
-    SEARCH_URL,
-    extract_debtor_inn,
-    extract_inn,
-)
-from src.database import Base
 from src.models.entities import Lot, Party, Trade
 from src.models.enums import (
-    ClaimKind,
     DZ_CLASSIFIER_CODES,
     DZ_CLASSIFIER_KEYWORDS,
+    ClaimKind,
     PartyRole,
     PersonKind,
     TradeForm,
@@ -36,9 +24,6 @@ from src.models.enums import (
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-engine = create_async_engine(settings.database_url)
-Session = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def is_receivable_lot(

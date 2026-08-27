@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from datetime import date as _date
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
@@ -18,6 +17,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,7 +39,7 @@ from src.models.enums import (
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ class Trade(Base):
     bankrupt_party_id: Mapped[int | None] = mapped_column(
         ForeignKey("parties.id", ondelete="SET NULL")
     )
-    bankrupt_party: Mapped["Party | None"] = relationship(
+    bankrupt_party: Mapped[Party | None] = relationship(
         "Party", foreign_keys=[bankrupt_party_id], lazy="selectin"
     )
 
@@ -99,7 +101,7 @@ class Trade(Base):
     raw_snapshot_id: Mapped[int | None] = mapped_column(
         ForeignKey("raw_snapshots.id", ondelete="SET NULL")
     )
-    raw_snapshot: Mapped["RawSnapshot | None"] = relationship(
+    raw_snapshot: Mapped[RawSnapshot | None] = relationship(
         "RawSnapshot", lazy="selectin"
     )
 
@@ -110,7 +112,7 @@ class Trade(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    lots: Mapped[list["Lot"]] = relationship(
+    lots: Mapped[list[Lot]] = relationship(
         "Lot", back_populates="trade", cascade="all, delete-orphan"
     )
 
@@ -137,7 +139,7 @@ class Lot(Base):
     trade_id: Mapped[int] = mapped_column(
         ForeignKey("trades.id", ondelete="CASCADE")
     )
-    trade: Mapped["Trade"] = relationship("Trade", back_populates="lots")
+    trade: Mapped[Trade] = relationship("Trade", back_populates="lots")
 
     lot_no: Mapped[int] = mapped_column(Integer)
 
@@ -193,16 +195,16 @@ class Lot(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    price_intervals: Mapped[list["PriceInterval"]] = relationship(
+    price_intervals: Mapped[list[PriceInterval]] = relationship(
         "PriceInterval", back_populates="lot", cascade="all, delete-orphan"
     )
-    claims: Mapped[list["Claim"]] = relationship(
+    claims: Mapped[list[Claim]] = relationship(
         "Claim", back_populates="lot", cascade="all, delete-orphan"
     )
-    score_snapshots: Mapped[list["ScoreSnapshot"]] = relationship(
+    score_snapshots: Mapped[list[ScoreSnapshot]] = relationship(
         "ScoreSnapshot", back_populates="lot", cascade="all, delete-orphan"
     )
-    documents: Mapped[list["Document"]] = relationship(
+    documents: Mapped[list[Document]] = relationship(
         "Document", back_populates="lot", cascade="all, delete-orphan"
     )
 
@@ -226,7 +228,7 @@ class PriceInterval(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
 
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
-    lot: Mapped["Lot"] = relationship("Lot", back_populates="price_intervals")
+    lot: Mapped[Lot] = relationship("Lot", back_populates="price_intervals")
 
     seq: Mapped[int] = mapped_column(Integer)
     price: Mapped[Decimal] = mapped_column(Numeric(18, 2))
@@ -295,17 +297,17 @@ class Party(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    bankrupt_trades: Mapped[list["Trade"]] = relationship(
+    bankrupt_trades: Mapped[list[Trade]] = relationship(
         "Trade",
         foreign_keys="Trade.bankrupt_party_id",
         back_populates="bankrupt_party",
     )
-    debtor_claims: Mapped[list["Claim"]] = relationship(
+    debtor_claims: Mapped[list[Claim]] = relationship(
         "Claim",
         foreign_keys="Claim.debtor_party_id",
         back_populates="debtor_party",
     )
-    guarantor_claims: Mapped[list["Claim"]] = relationship(
+    guarantor_claims: Mapped[list[Claim]] = relationship(
         "Claim",
         foreign_keys="Claim.guarantor_party_id",
         back_populates="guarantor_party",
@@ -332,7 +334,7 @@ class Claim(Base):
     )
 
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
-    lot: Mapped["Lot"] = relationship("Lot", back_populates="claims")
+    lot: Mapped[Lot] = relationship("Lot", back_populates="claims")
 
     kind: Mapped[str] = mapped_column(
         SAEnum(ClaimKind, name="claim_kind_enum"), default=ClaimKind.UNKNOWN.value
@@ -362,13 +364,13 @@ class Claim(Base):
     debtor_party_id: Mapped[int | None] = mapped_column(
         ForeignKey("parties.id", ondelete="SET NULL")
     )
-    debtor_party: Mapped["Party | None"] = relationship(
+    debtor_party: Mapped[Party | None] = relationship(
         "Party", foreign_keys=[debtor_party_id], back_populates="debtor_claims"
     )
     guarantor_party_id: Mapped[int | None] = mapped_column(
         ForeignKey("parties.id", ondelete="SET NULL")
     )
-    guarantor_party: Mapped["Party | None"] = relationship(
+    guarantor_party: Mapped[Party | None] = relationship(
         "Party", foreign_keys=[guarantor_party_id], back_populates="guarantor_claims"
     )
 
@@ -396,7 +398,7 @@ class Document(Base):
     )
 
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
-    lot: Mapped["Lot"] = relationship("Lot", back_populates="documents")
+    lot: Mapped[Lot] = relationship("Lot", back_populates="documents")
 
     kind: Mapped[str | None] = mapped_column(String(50))
     title: Mapped[str | None] = mapped_column(String(300))
@@ -425,7 +427,7 @@ class ScoreSnapshot(Base):
     )
 
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
-    lot: Mapped["Lot"] = relationship("Lot", back_populates="score_snapshots")
+    lot: Mapped[Lot] = relationship("Lot", back_populates="score_snapshots")
 
     score_class: Mapped[str] = mapped_column(SAEnum(LotClass, name="snapshot_class_enum"))
     ev: Mapped[Decimal] = mapped_column(Numeric(18, 2))
@@ -461,6 +463,21 @@ class RawSnapshot(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (Index("ix_raw_snapshots_source", "source"),)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AlertState — дедупликация Telegram-алертов
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class AlertState(Base):
+    __tablename__ = "alerts_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"), index=True)
+    alerted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (Index("ix_alerts_state_lot_time", "lot_id", "alerted_at"),)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,18 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
 import httpx
 from selectolax.parser import HTMLParser
 
-from src.config import get_settings
-from src.models.enums import TradeKind, TradeStatus
-
 if TYPE_CHECKING:
-    from src.schemas.lot import ClaimSchema, DebtorPartySchema
+    pass
 
 
 EFRSB_BASE = "https://bankrupt-portal.ru"

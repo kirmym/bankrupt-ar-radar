@@ -1,9 +1,6 @@
 """Адаптер ЭТП «Сбербанк-АСТ» (банкротный контур)."""
 from __future__ import annotations
 
-import re
-from datetime import datetime
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from selectolax.parser import HTMLParser

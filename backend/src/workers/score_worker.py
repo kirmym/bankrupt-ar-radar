@@ -3,46 +3,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
-from src.models.entities import Claim, Lot, Party, ScoreSnapshot
-from src.models.enums import PartyRole
+from src.database import async_session_factory
+from src.models.entities import Claim, Lot, ScoreSnapshot
 from src.schemas.lot import ClaimSchema, DebtorPartySchema
 from src.scoring.v1 import ScoreInput, compute_ev_and_class
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url)
-Session = async_sessionmaker(engine, expire_on_commit=False)
-
 
 async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
     """Пересчитывает скоринг одного лота и сохраняет снимок."""
-    stmt = select(Lot).where(Lot.id == lot_id)
+    stmt = (
+        select(Lot)
+        .where(Lot.id == lot_id)
+        .options(
+            selectinload(Lot.claims).selectinload(Claim.debtor_party),
+        )
+    )
     result = await session.execute(stmt)
     lot = result.scalar_one_or_none()
     if not lot:
         return None
 
-    # Дебитор
+    # Дебитор из первого требования
     debtor: DebtorPartySchema | None = None
     if lot.claims:
         claim = lot.claims[0]
         if claim.debtor_party:
-            p = claim.debtor_party
-            debtor = DebtorPartySchema.model_validate(p)
+            debtor = DebtorPartySchema.model_validate(claim.debtor_party, from_attributes=True)
 
     # Claims
-    claim_schemas = []
-    for c in lot.claims:
-        if c.debtor_party:
-            c.debtor_party = c.debtor_party  # load
-        claim_schemas.append(ClaimSchema.model_validate(c))
+    claim_schemas = [
+        ClaimSchema.model_validate(c, from_attributes=True) for c in lot.claims
+    ]
 
     inp = ScoreInput(
         lot_id=lot.id,
@@ -70,7 +70,7 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
         stop_factors=result.stop_factors,
         gaps=result.gaps,
         model_version=result.version,
-        scored_at=datetime.now(timezone.utc),
+        scored_at=datetime.now(UTC),
     )
     session.add(snapshot)
 
@@ -93,7 +93,7 @@ async def run_rescore() -> int:
     """Пересчитывает все лоты, у которых поменялся nominal_claimed/debtor."""
     logger.info("score: starting")
 
-    async with Session() as session:
+    async with async_session_factory() as session:
         stmt = select(Lot.id).where(Lot.is_receivable == True)  # noqa: E712
         result = await session.execute(stmt)
         lot_ids = result.scalars().all()

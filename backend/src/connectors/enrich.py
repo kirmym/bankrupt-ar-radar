@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -104,7 +103,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> None:
         return
 
     try:
-        url = f"https://kad.arbitr.ru/Kad/SearchCases"
+        url = "https://kad.arbitr.ru/Kad/SearchCases"
         payload = {
             "Count": 5,
             "Page": 1,

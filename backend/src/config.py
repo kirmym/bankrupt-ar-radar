@@ -13,9 +13,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Database
+    # Database (Railway отдаёт postgres:// — приводим к asyncpg-драйверу)
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ar_radar"
-    sync_database_url: str = "postgresql://postgres:postgres@localhost:5432/ar_radar"
+    sync_database_url: str = ""
+
+    # Single-process deploy: воркеры и бот живут в процессе API
+    enable_workers: bool = True
+    enable_bot: bool = True
+    # Веб-статика (собранный Vite dist), раздаваемая FastAPI
+    web_dist_dir: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -55,6 +61,7 @@ class Settings(BaseSettings):
     ingest_interval_minutes: int = 15
     enrich_interval_minutes: int = 60
     score_interval_minutes: int = 30
+    alert_interval_minutes: int = 30
 
     # Efdup check
     efrsb_check_interval_minutes: int = 30
@@ -62,6 +69,19 @@ class Settings(BaseSettings):
     @property
     def telegram_chat_ids_list(self) -> list[str]:
         return [x.strip() for x in self.telegram_chat_ids.split(",") if x.strip()]
+
+    @property
+    def async_database_url(self) -> str:
+        """DATABASE_URL, гарантированно с asyncpg-драйвером.
+
+        Railway/Heroku-стиль: postgres:// или postgresql:// → postgresql+asyncpg://
+        """
+        url = self.database_url
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
 
     @property
     def is_production(self) -> bool:

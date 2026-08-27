@@ -1,38 +1,55 @@
-"""FastAPI — REST API."""
+"""FastAPI — REST API + SPA-статика + фоновые воркеры в одном процессе."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from decimal import Decimal
+import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
 from src.database import get_db
-from src.models.entities import Lot, ScoreSnapshot, Trade, UserFeedback
+from src.models.entities import Claim, Lot, Trade, UserFeedback
 from src.models.enums import LotClass, TradeStatus
+from src.runtime import start_background_tasks, stop_background_tasks
 from src.schemas.lot import (
     DashboardStats,
     FeedbackCreate,
     FeedbackSchema,
     HealthResponse,
     LotCardSchema,
-    LotFilter,
     LotListSchema,
     LotSchema,
-    MessageResponse,
 )
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    tasks: list = []
+    if settings.enable_workers:
+        logger.info("lifespan: starting background workers")
+        tasks = start_background_tasks()
+    yield
+    if tasks:
+        await stop_background_tasks(tasks)
+
 
 app = FastAPI(
     title="AR Radar API",
     description="Радар дебиторской задолженности — API",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -53,44 +70,54 @@ async def health() -> HealthResponse:
 
 @app.get("/api/v1/lots", response_model=LotListSchema, tags=["lots"])
 async def list_lots(
-    filter: Annotated[LotFilter, Query()],
     db: Annotated[AsyncSession, Depends(get_db)],
+    page: int = Query(ge=1, default=1),
+    page_size: int = Query(ge=1, le=100, default=20),
+    score_class: LotClass | None = None,
+    min_ev: float | None = Query(default=None, ge=0),
+    max_ev: float | None = Query(default=None, ge=0),
+    debtor_inn: str | None = None,
+    trade_status: TradeStatus | None = None,
+    deadline_before: str | None = None,
 ) -> LotListSchema:
     """Лента лотов с фильтрацией."""
     q = (
         select(Lot)
-        .outerjoin(Trade, Lot.trade_id == Trade.id)
+        .join(Trade, Lot.trade_id == Trade.id)
         .where(Lot.is_receivable == True)  # noqa: E712
+        .options(
+            selectinload(Lot.claims).selectinload(Claim.debtor_party),
+        )
     )
 
-    if filter.score_class:
-        q = q.where(Lot.score_class == filter.score_class.value)
-    if filter.min_ev is not None:
-        q = q.where(Lot.score_ev >= filter.min_ev)
-    if filter.max_ev is not None:
-        q = q.where(Lot.score_ev <= filter.max_ev)
-    if filter.trade_status:
-        q = q.where(Trade.status == filter.trade_status.value)
-    if filter.deadline_before:
-        q = q.where(Lot.current_interval_to <= filter.deadline_before)
-    if filter.active_after:
-        q = q.where(Lot.current_interval_to >= filter.active_after)
+    if score_class:
+        q = q.where(Lot.score_class == score_class.value)
+    if min_ev is not None:
+        q = q.where(Lot.score_ev >= min_ev)
+    if max_ev is not None:
+        q = q.where(Lot.score_ev <= max_ev)
+    if debtor_inn:
+        q = q.join(Claim, Claim.lot_id == Lot.id).join(
+            Claim.debtor_party, isouter=True
+        ).where(Claim.debtor_party.has(inn=debtor_inn))
+    if trade_status:
+        q = q.where(Trade.status == trade_status.value)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
     q = q.order_by(Lot.score_ev.desc().nullslast(), Lot.updated_at.desc())
-    q = q.offset((filter.page - 1) * filter.page_size).limit(filter.page_size)
+    q = q.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(q)
-    lots = result.scalars().all()
+    lots = result.scalars().unique().all()
 
-    pages = (total + filter.page_size - 1) // filter.page_size
+    pages = (total + page_size - 1) // page_size
     return LotListSchema(
-        items=[LotSchema.model_validate(l) for l in lots],
+        items=[LotSchema.model_validate(lot, from_attributes=True) for lot in lots],
         total=total,
-        page=filter.page,
-        page_size=filter.page_size,
+        page=page,
+        page_size=page_size,
         pages=pages,
     )
 
@@ -105,13 +132,18 @@ async def get_lot(
         select(Lot)
         .where(Lot.id == lot_id)
         .options(
-            *Lot.__mapper__.iterate_properties  # load all relationships
+            selectinload(Lot.trade).selectinload(Trade.bankrupt_party),
+            selectinload(Lot.claims).selectinload(Claim.debtor_party),
+            selectinload(Lot.claims).selectinload(Claim.guarantor_party),
+            selectinload(Lot.price_intervals),
+            selectinload(Lot.documents),
+            selectinload(Lot.score_snapshots),
         )
     )
     lot = result.scalar_one_or_none()
     if not lot:
         raise HTTPException(status_code=404, detail="Lot not found")
-    return LotCardSchema.model_validate(lot)
+    return LotCardSchema.model_validate(lot, from_attributes=True)
 
 
 # ── Статистика ────────────────────────────────────────────────────────────────
@@ -122,38 +154,24 @@ async def get_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DashboardStats:
     """Дашборд — агрегированная статистика."""
-    total = (await db.execute(select(func.count(Lot.id)))).scalar() or 0
-    receivable = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.is_receivable == True)  # noqa: E712
-        )
-    ).scalar() or 0
-    scored = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.score_class.isnot(None))
-        )
-    ).scalar() or 0
 
-    a_count = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.score_class == LotClass.A.value)
-        )
-    ).scalar() or 0
-    b_count = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.score_class == LotClass.B.value)
-        )
-    ).scalar() or 0
-    c_count = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.score_class == LotClass.C.value)
-        )
-    ).scalar() or 0
-    d_count = (
-        await db.execute(
-            select(func.count(Lot.id)).where(Lot.score_class == LotClass.D.value)
-        )
-    ).scalar() or 0
+    async def _count(where=None) -> int:
+        stmt = select(func.count(Lot.id))
+        if where is not None:
+            stmt = stmt.where(where)
+        return (await db.execute(stmt)).scalar() or 0
+
+    total = await _count()
+    receivable = await _count(Lot.is_receivable == True)  # noqa: E712
+    scored = await _count(Lot.score_class.isnot(None))
+    a_count = await _count(Lot.score_class == LotClass.A.value)
+    b_count = await _count(Lot.score_class == LotClass.B.value)
+    c_count = await _count(Lot.score_class == LotClass.C.value)
+    d_count = await _count(Lot.score_class == LotClass.D.value)
+
+    last_ingest = (
+        await db.execute(select(func.max(Lot.updated_at)))
+    ).scalar()
 
     return DashboardStats(
         total_lots=total,
@@ -164,7 +182,7 @@ async def get_stats(
         class_c=c_count,
         class_d=d_count,
         alerts_sent_today=0,
-        last_ingest_at=None,
+        last_ingest_at=last_ingest,
     )
 
 
@@ -185,31 +203,31 @@ async def create_feedback(
     db.add(fb)
     await db.commit()
     await db.refresh(fb)
-    return FeedbackSchema.model_validate(fb)
+    return FeedbackSchema.model_validate(fb, from_attributes=True)
 
 
-# ── Веб-интерфейс (SPA fallback) ─────────────────────────────────────────────
+# ── SPA-статика (собранный фронтенд) ────────────────────────────────────────
 
+web_dist = Path(settings.web_dist_dir) if settings.web_dist_dir else Path(__file__).parent.parent.parent / "web" / "dist"
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def root():
-    return """
-    <!doctype html>
-    <html lang="ru">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>AR Radar</title>
-        <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-        <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-        <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-      </head>
-      <body>
-        <div id="root"></div>
-        <script type="text/babel" src="/static/app.jsx"></script>
-      </body>
-    </html>
-    """
+if web_dist.is_dir():
+    assets_dir = web_dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def spa_index() -> FileResponse:
+        return FileResponse(web_dist / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str) -> FileResponse:
+        # Не перехватываем API и health
+        if full_path.startswith(("api/", "health", "docs", "openapi.json")):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = web_dist / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(web_dist / "index.html")
 
 
 if __name__ == "__main__":

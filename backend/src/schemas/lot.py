@@ -5,22 +5,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.models.enums import (
     ClaimKind,
     Gap,
     LotClass,
     OrgStatus,
-    PartyRole,
-    PersonKind,
     Scenario,
     StopFactor,
-    TradeForm,
     TradeKind,
     TradeStatus,
 )
-
 
 # ── Лот ──────────────────────────────────────────────────────────────────────
 
@@ -72,7 +68,10 @@ class ClaimSchema(BaseModel):
     enforcement_alive: bool = False
     secured: bool = False
     assignment_forbidden: bool = False
+    counterclaim_risk: bool = False
+    personal_claim: bool = False
     debtor_party: DebtorPartySchema | None = None
+    guarantor_party: DebtorPartySchema | None = None
 
 
 class LotSchema(BaseModel):

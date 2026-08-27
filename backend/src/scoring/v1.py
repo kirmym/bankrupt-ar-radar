@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 from src.config import get_settings
@@ -170,12 +170,12 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
 
     # ── 2. Дебитор ───────────────────────────────────────────────────────────
     debtor = inp.debtor
-    debtor_active = debtor is not None and debtor.status.value == "active" if debtor else False
 
     if debtor:
-        if debtor.status.value == "excluded":
+        debtor_status = debtor.status.value if debtor.status else None
+        if debtor_status == "excluded":
             stop_factors.append(StopFactor.DEBTOR_EXCLUDED)
-        elif debtor.status.value == "liquidation":
+        elif debtor_status == "liquidation":
             stop_factors.append(StopFactor.DEBTOR_LIQUIDATION)
 
         if debtor.fssp_uncollectible:

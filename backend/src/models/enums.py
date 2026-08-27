@@ -1,19 +1,19 @@
 """Константы — enum'ы и справочники."""
-from enum import Enum
+from enum import StrEnum
 
 
-class TradeKind(str, Enum):
+class TradeKind(StrEnum):
     PUBLIC_OFFER = "public_offer"
     OPEN_BIDDING = "open_bidding"
     CLOSED_BIDDING = "closed_bidding"
 
 
-class TradeForm(str, Enum):
+class TradeForm(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
 
 
-class TradeStatus(str, Enum):
+class TradeStatus(StrEnum):
     ANNOUNCED = "announced"
     APPLICATIONS_OPEN = "applications_open"
     IN_PROGRESS = "in_progress"
@@ -23,13 +23,13 @@ class TradeStatus(str, Enum):
     SUSPENDED = "suspended"
 
 
-class PersonKind(str, Enum):
+class PersonKind(StrEnum):
     UL = "ul"  # Юрлицо
     IP = "ip"  # ИП
     FL = "fl"  # Физлицо
 
 
-class PartyRole(str, Enum):
+class PartyRole(StrEnum):
     BANKRUPT = "bankrupt"
     DEBTOR = "debtor"
     GUARANTOR = "guarantor"
@@ -38,7 +38,7 @@ class PartyRole(str, Enum):
     AM = "am"  # Арбитражный управляющий
 
 
-class OrgStatus(str, Enum):
+class OrgStatus(StrEnum):
     ACTIVE = "active"
     LIQUIDATION = "liquidation"
     EXCLUDED = "excluded"
@@ -46,7 +46,7 @@ class OrgStatus(str, Enum):
     INVALID = "invalid"  # Недостоверные сведения
 
 
-class ClaimKind(str, Enum):
+class ClaimKind(StrEnum):
     TRADE_AR = "trade_ar"  # Требование, уступленное в рамках АР
     ADVANCE = "advance"  # Аванс
     LOAN = "loan"  # Заём / кредит
@@ -56,14 +56,14 @@ class ClaimKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class LotClass(str, Enum):
+class LotClass(StrEnum):
     A = "A"
     B = "B"
     C = "C"
     D = "D"  # Сток-фактор, покупать запрещено
 
 
-class Scenario(str, Enum):
+class Scenario(StrEnum):
     NEGOTIATION = "negotiation"  # Мировое соглашение
     COURT = "court"  # Судебное взыскание
     ENFORCEMENT = "enforcement"  # Исполнительное производство
@@ -71,7 +71,7 @@ class Scenario(str, Enum):
     SUBSIDIARY = "subsidiary"  # Субсидиарная ответственность КДЛ
 
 
-class StopFactor(str, Enum):
+class StopFactor(StrEnum):
     NO_DEBTOR_INN = "no_debtor_inn"
     DEBTOR_EXCLUDED = "debtor_excluded"
     DEBTOR_LIQUIDATION = "debtor_liquidation"
@@ -85,7 +85,7 @@ class StopFactor(str, Enum):
     COUNTERCLAIM_RISK = "counterclaim_risk"
 
 
-class Gap(str, Enum):
+class Gap(StrEnum):
     DEBTOR_INN_MISSING = "debtor_inn_missing"
     DEBTOR_INN_UNVERIFIED = "debtor_inn_unverified"
     BO_MISSING = "bo_missing"

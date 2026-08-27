@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.config import get_settings
 from src.connectors.files import (
@@ -17,16 +14,11 @@ from src.connectors.files import (
     sha256_hex,
 )
 from src.connectors.llm import extract_facts_with_llm
-from src.models.entities import Document, Lot
-
-if TYPE_CHECKING:
-    pass
+from src.database import async_session_factory
+from src.models.entities import Document
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-engine = create_async_engine(settings.database_url)
-Session = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def process_file(doc: Document, lot_id: int, session) -> dict | None:
@@ -54,7 +46,7 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
 
     # Хэш
     doc.sha256 = sha256_hex(data)
-    doc.downloaded_at = datetime.now(timezone.utc)
+    doc.downloaded_at = datetime.now(UTC)
 
     # Текст
     text = extract_text(data)
@@ -81,7 +73,7 @@ async def run_files(batch_size: int = 20) -> int:
     """Скачивает и обрабатывает файлы лотов, у которых их ещё нет."""
     logger.info("files: starting")
 
-    async with Session() as session:
+    async with async_session_factory() as session:
         # Лоты, у которых есть URL'ы файлов, но нет downloaded_at
         stmt = (
             select(Document)

@@ -4,15 +4,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-import pytest
-
-from src.scoring.v1 import (
-    compute_ev_and_class,
-    compute_success_rate,
-    estimate_recovery_time,
-    ScoreInput,
-)
-from src.schemas.lot import ClaimSchema, DebtorPartySchema
 from src.models.enums import (
     ClaimKind,
     Gap,
@@ -20,6 +11,13 @@ from src.models.enums import (
     OrgStatus,
     Scenario,
     StopFactor,
+)
+from src.schemas.lot import ClaimSchema, DebtorPartySchema
+from src.scoring.v1 import (
+    ScoreInput,
+    compute_ev_and_class,
+    compute_success_rate,
+    estimate_recovery_time,
 )
 
 

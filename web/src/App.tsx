@@ -1,7 +1,7 @@
 import { Link, Route, Routes } from "react-router-dom";
-import { Dashboard } from "./pages/Dashboard";
-import { LotList } from "./pages/LotList";
-import { LotDetail } from "./pages/LotDetail";
+import Dashboard from "./pages/Dashboard";
+import LotList from "./pages/LotList";
+import LotDetail from "./pages/LotDetail";
 
 export default function App() {
   return (
@@ -21,9 +21,7 @@ export default function App() {
               </Link>
             </nav>
           </div>
-          <div className="text-xs text-slate-500">
-            v0.1.0 · источник: ЕФРСБ
-          </div>
+          <div className="text-xs text-slate-500">v0.1.0 · источник: ЕФРСБ</div>
         </div>
       </header>
       <main className="max-w-7xl mx-auto px-4 py-6">

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 if TYPE_CHECKING:
-    from src.models.entities import Lot, Trade
+    pass
 
 
 @dataclass
@@ -26,7 +26,7 @@ class EtpLotUpdate:
     cutoff_price: Decimal | None = None
     deposit_amount: Decimal | None = None
     status: str | None = None
-    files: list["EtpFile"] | None = None
+    files: list[EtpFile] | None = None
 
 
 @dataclass
@@ -50,7 +50,7 @@ class EtpAdapter(ABC):
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
-    async def __aenter__(self) -> "EtpAdapter":
+    async def __aenter__(self) -> EtpAdapter:
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=True,

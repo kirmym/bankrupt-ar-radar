@@ -3,33 +3,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.config import get_settings
 from src.connectors.enrich import enrich_party
+from src.database import async_session_factory
 from src.models.entities import Party
 from src.models.enums import PartyRole
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url)
-Session = async_sessionmaker(engine, expire_on_commit=False)
-
 
 async def run_enrich(batch_size: int = 50) -> int:
-    """Обогащает партию дебиторов, которых давно не обогащали."""
+    """Обогащает партии дебиторов, которых давно не обогащали."""
     logger.info("enrich: starting")
 
-    cutoff = datetime.now(timezone.utc)
-    async with Session() as session:
+    async with async_session_factory() as session:
         # Берём дебиторов, у которых source_as_of старше суток
         stmt = (
             select(Party)
@@ -44,7 +36,7 @@ async def run_enrich(batch_size: int = 50) -> int:
         for debtor in debtors:
             try:
                 await enrich_party(debtor, session)
-                debtor.source_as_of = datetime.now(timezone.utc)
+                debtor.source_as_of = datetime.now(UTC)
                 await session.commit()
                 logger.info("enrich: %s done", debtor.inn)
             except Exception:
@@ -52,7 +44,7 @@ async def run_enrich(batch_size: int = 50) -> int:
                 await session.rollback()
 
         logger.info("enrich: %d debtors processed", len(debtors))
-        return len(debters)
+        return len(debtors)
 
 
 async def main() -> None:

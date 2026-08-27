@@ -114,7 +114,13 @@ def extract_facts_from_text(text: str) -> dict:
 
     has_judgment = any(
         kw in text_lc
-        for kw in ("решение суда", "решением суда", "вступило в законную силу")
+        for kw in (
+            "решение суда",
+            "решением суда",
+            "решением арбитражного суда",
+            "решение арбитражного суда",
+            "вступило в законную силу",
+        )
     )
     has_writ = "исполнительный лист" in text_lc or "исполнительного листа" in text_lc
     has_secured = any(
@@ -123,7 +129,7 @@ def extract_facts_from_text(text: str) -> dict:
     has_assignment_forbidden = any(
         kw in text_lc
         for kw in (
-            "без согласия должника не уступ",
+            "без согласия должника",
             "запрет уступки",
             "не подлежит уступке",
         )
