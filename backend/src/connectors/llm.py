@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 if TYPE_CHECKING:
     pass
@@ -47,6 +51,60 @@ EXTRACTION_SYSTEM_PROMPT = """\
 """
 
 
+class LlmDebtorFacts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str | None = None
+    inn: str | None = None
+    ogrn: str | None = None
+
+    @field_validator("inn")
+    @classmethod
+    def validate_inn(cls, value: str | None) -> str | None:
+        if value is not None and (not value.isdigit() or len(value) not in (10, 12)):
+            raise ValueError("invalid INN")
+        return value
+
+
+class LlmClaimFacts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str | None = Field(
+        default=None,
+        pattern="^(trade_ar|advance|loan|restitution|subsidiary|registry_claim_on_bankrupt|unknown)$",
+    )
+    principal: Decimal | None = None
+    penalties: Decimal | None = None
+    currency: str | None = None
+    base_contract: str | None = None
+    base_date: date | None = None
+    due_date: date | None = None
+    court_case_no: str | None = None
+    has_judgment: bool | None = None
+    has_writ: bool | None = None
+    secured: bool | None = None
+    assignment_forbidden: bool | None = None
+    counterclaim_risk: bool | None = None
+    personal_claim: bool | None = None
+
+
+class LlmFacts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    debtor: LlmDebtorFacts | None = None
+    claim: LlmClaimFacts | None = None
+    bankrupt: LlmDebtorFacts | None = None
+
+
+def validate_llm_facts(payload: Any) -> dict[str, Any] | None:
+    """Validate and JSON-normalize an LLM response before storing it."""
+    try:
+        validated = LlmFacts.model_validate(payload)
+    except ValidationError:
+        return None
+    return validated.model_dump(mode="json", exclude_none=True)
+
+
 def build_extraction_prompt(text: str) -> list[dict]:
     return [
         {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
@@ -74,7 +132,10 @@ async def extract_facts_with_llm(text: str, openai_client: Any = None) -> dict:
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content
-        return {"facts": json.loads(content), "source": "llm"}
+        facts = validate_llm_facts(json.loads(content or "{}"))
+        if facts is None:
+            raise ValueError("invalid LLM fact schema")
+        return {"facts": facts, "source": "llm"}
     except Exception as e:
         logger.exception("LLM extraction failed: %s", e)
         from src.connectors.files import extract_facts_from_text

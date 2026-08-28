@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -78,7 +79,7 @@ class LotSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    guid: str
+    guid: UUID
     lot_no: int
     title: str | None = None
     description_text: str | None = None
@@ -133,7 +134,7 @@ class TradeBriefSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    guid: str
+    guid: UUID
     efrsb_url: str | None = None
     etp_name: str | None = None
     etp_url: str | None = None
@@ -245,10 +246,10 @@ class AlertCreate(BaseModel):
 
 
 class FeedbackCreate(BaseModel):
-    lot_id: int
+    lot_id: int = Field(gt=0)
     action: Annotated[str, Field(pattern="^(watch|reject|bought)$")]
-    recovered_amount: Decimal | None = None
-    note: str | None = None
+    recovered_amount: Decimal | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=4000)
 
 
 class FeedbackSchema(BaseModel):
@@ -268,9 +269,14 @@ class FeedbackSchema(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
-    database: str = "ok"
-    redis: str = "ok"
+    database: str = "not_checked"
+    redis: str = "not_used"
 
 
 class MessageResponse(BaseModel):
     message: str
+
+
+# These classes are declared below LotCardSchema for a compact file layout.
+# Resolve their annotations before FastAPI handles the first real response.
+LotCardSchema.model_rebuild()

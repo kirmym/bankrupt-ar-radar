@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # App
     app_env: str = "development"
     log_level: str = "INFO"
+    cors_origins: str = "http://localhost:5173"
+    # Если задан, защищает диагностические и изменяющие API по X-API-Key.
+    # Пустое значение оставляет локальную разработку совместимой со старым режимом.
+    api_auth_token: str = ""
 
     # Telegram
     telegram_bot_token: str = ""
@@ -37,10 +41,15 @@ class Settings(BaseSettings):
     # ЕФРСБ REST
     efrsb_api_url: str = "https://bank-publications-demo.fedresurs.ru"
     efrsb_api_token: str = ""
+    efrsb_public_url: str = "https://bankrot.fedresurs.ru"
+    ingest_max_pages: int = 10
+    ingest_page_size: int = 50
 
     # ФССП
     fssp_api_url: str = "https://api-ip.fssprus.ru"
     fssp_api_token: str = ""
+    # Только источники с подтверждённым бесплатным API. Пусто = API выключены.
+    free_api_sources: str = ""
 
     # LLM
     openai_api_key: str = ""
@@ -69,6 +78,14 @@ class Settings(BaseSettings):
     @property
     def telegram_chat_ids_list(self) -> list[str]:
         return [x.strip() for x in self.telegram_chat_ids.split(",") if x.strip()]
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    @property
+    def free_api_sources_list(self) -> set[str]:
+        return {x.strip().lower() for x in self.free_api_sources.split(",") if x.strip()}
 
     @property
     def async_database_url(self) -> str:

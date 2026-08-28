@@ -4,17 +4,29 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import AsyncGenerator
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from selectolax.parser import HTMLParser
+
+from src.config import get_settings
 
 if TYPE_CHECKING:
     pass
 
 
-EFRSB_BASE = "https://bankrupt-portal.ru"
-SEARCH_URL = "https://bankrupt-portal.ru/publications/public/offer"
+class SourceAccessError(RuntimeError):
+    """The source returned an access or availability error."""
+
+
+class SourceParseError(RuntimeError):
+    """The source responded but its public markup no longer matches the parser."""
+
+
+def public_search_url() -> str:
+    return f"{get_settings().efrsb_public_url.rstrip('/')}/publications/public/offer"
 
 
 # ── Паттерны ─────────────────────────────────────────────────────────────────
@@ -22,6 +34,27 @@ SEARCH_URL = "https://bankrupt-portal.ru/publications/public/offer"
 
 INN_RE = re.compile(r"\b(\d{10}|\d{12})\b")
 OGRN_RE = re.compile(r"\b(\d{13}|\d{15})\b")
+
+
+def parse_price(text: str) -> Decimal | None:
+    """Parse a Russian money string without silently inventing a price."""
+    if not text:
+        return None
+    match = re.search(r"\d(?:[\d\s\u00a0.,]*\d)?", text)
+    if not match:
+        return None
+    raw = match.group(0).replace(" ", "").replace("\u00a0", "")
+    if "," in raw:
+        integer, fraction = raw.rsplit(",", 1)
+        clean = integer.replace(".", "") + "." + fraction
+    elif raw.count(".") == 1 and len(raw.rsplit(".", 1)[1]) <= 2:
+        clean = raw
+    else:
+        clean = raw.replace(".", "")
+    try:
+        return Decimal(clean)
+    except InvalidOperation:
+        return None
 
 
 def extract_inn(text: str) -> list[str]:
@@ -115,44 +148,80 @@ def parse_lot_card(html: str, url: str) -> dict:
 
 
 async def fetch_page(url: str, timeout: float = 30.0) -> str:
-    """Загружает страницу с задержкой."""
+    """Загружает публичную страницу с ограниченными редиректами."""
     await asyncio.sleep(0.5)  # rate limit
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url, headers={"User-Agent": "AR-Radar/1.0"})
-        resp.raise_for_status()
-        return resp.text
+    source_url = get_settings().efrsb_public_url
+    current = url
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        for redirect_count in range(4):
+            if urlparse(current).netloc != urlparse(source_url).netloc:
+                raise SourceAccessError("source redirect leaves configured host")
+            resp = await client.get(current, headers={"User-Agent": "AR-Radar/1.0"})
+            if 300 <= resp.status_code < 400:
+                location = resp.headers.get("location")
+                if not location or redirect_count == 3:
+                    raise SourceAccessError("source redirect limit exceeded")
+                current = urljoin(current, location)
+                continue
+            if resp.status_code in (401, 403, 429):
+                raise SourceAccessError(f"source access status={resp.status_code}")
+            resp.raise_for_status()
+            return resp.text
+    raise SourceAccessError("source redirect limit exceeded")
 
 
 async def search_public_offers(
     page: int = 1,
     per_page: int = 50,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
-    """Ищет лоты публичного предложения.
-
-    Пока нет договора с ЕФРСБ — парсим bankrupt-portal.ru как демо.
-    После получения efrsb_api_token — переключить на REST API.
-    """
-    params = {
+    """Ищет лоты публичного предложения через разрешённую HTML-выдачу."""
+    params: dict[str, str | int] = {
         "page": page,
         "limit": per_page,
         "type": "public_offer",
     }
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        resp = await client.get(SEARCH_URL, params=params)
-        if resp.status_code == 403:
-            return []  # нужен real token
-        resp.raise_for_status()
+    source_url = public_search_url()
+    current = source_url
+    own_client = client is None
+    active_client = client or httpx.AsyncClient(timeout=30.0, follow_redirects=False)
+    try:
+        for redirect_count in range(4):
+            if urlparse(current).netloc != urlparse(get_settings().efrsb_public_url).netloc:
+                raise SourceAccessError("source redirect leaves configured host")
+            resp = await active_client.get(current, params=params if redirect_count == 0 else None)
+            if 300 <= resp.status_code < 400:
+                location = resp.headers.get("location")
+                if not location or redirect_count == 3:
+                    raise SourceAccessError("source redirect limit exceeded")
+                current = urljoin(current, location)
+                continue
+            if resp.status_code in (401, 403, 429):
+                raise SourceAccessError(f"source access status={resp.status_code}")
+            resp.raise_for_status()
+            break
+        else:
+            raise SourceAccessError("source redirect limit exceeded")
+    finally:
+        if own_client:
+            await active_client.aclose()
 
     tree = HTMLParser(resp.text)
     items: list[dict] = []
 
-    for row in tree.css(".lot-row, .publication-item, .offer-item"):
+    rows = tree.css(".lot-row, .publication-item, .offer-item")
+    if not rows and not any(
+        marker in resp.text.lower() for marker in ("лот", "торг", "публичн")
+    ):
+        raise SourceParseError("public offer rows were not found")
+
+    for row in rows:
         link_el = row.css_first("a[href*='/lot/'], a[href*='/publication/']")
         if not link_el:
             continue
 
-        href = link_el.attrs.get("href", "")
+        href = link_el.attrs.get("href") or ""
         title = link_el.text().strip()
 
         price_el = row.css_first('[class*="price"], [class*="sum"]')
@@ -161,11 +230,16 @@ async def search_public_offers(
         date_el = row.css_first("time, .date, [class*='date']")
         date_text = date_el.text().strip() if date_el else ""
 
+        item_url = urljoin(f"{get_settings().efrsb_public_url.rstrip('/')}/", href)
+        if urlparse(item_url).netloc != urlparse(get_settings().efrsb_public_url).netloc:
+            continue
+
         items.append({
             "title": title,
-            "url": href if href.startswith("http") else f"{EFRSB_BASE}{href}",
+            "url": item_url,
             "price_text": price_text,
             "date_text": date_text,
+            "source_page": page,
         })
 
     return items
@@ -174,9 +248,10 @@ async def search_public_offers(
 async def iter_all_public_offers(
     max_pages: int = 10,
     per_page: int = 50,
+    start_page: int = 1,
 ) -> AsyncGenerator[dict, None]:
     """Итерирует все страницы публичных предложений."""
-    for page in range(1, max_pages + 1):
+    for page in range(max(1, start_page), max_pages + 1):
         items = await search_public_offers(page=page, per_page=per_page)
         if not items:
             break

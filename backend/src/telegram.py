@@ -23,8 +23,9 @@ def fmt_money(value: Decimal | float | int | None) -> str:
     if value is None:
         return "—"
     try:
-        return f"{int(value):,}".replace(",", " ") + " ₽"
-    except (ValueError, TypeError):
+        amount = Decimal(str(value)).quantize(Decimal("1"))
+        return f"{amount:,.0f}".replace(",", " ") + " ₽"
+    except (ValueError, TypeError, ArithmeticError):
         return "—"
 
 

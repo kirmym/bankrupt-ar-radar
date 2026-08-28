@@ -35,10 +35,14 @@ async def run_enrich(batch_size: int = 50) -> int:
 
         for debtor in debtors:
             try:
-                await enrich_party(debtor, session)
-                debtor.source_as_of = datetime.now(UTC)
-                await session.commit()
-                logger.info("enrich: %s done", debtor.inn)
+                statuses = await enrich_party(debtor, session)
+                enabled = settings.free_api_sources_list.intersection(statuses)
+                if enabled and all(statuses[name] for name in enabled):
+                    debtor.source_as_of = datetime.now(UTC)
+                    await session.commit()
+                    logger.info("enrich: %s done (%s)", debtor.inn, statuses)
+                else:
+                    logger.warning("enrich: %s is stale (%s)", debtor.inn, statuses)
             except Exception:
                 logger.exception("enrich: failed for %s", debtor.inn)
                 await session.rollback()

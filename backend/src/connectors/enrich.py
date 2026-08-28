@@ -1,13 +1,15 @@
 """Enrich-воркер — обогащение дебитора данными из открытых реестров."""
 from __future__ import annotations
 
-import asyncio
+import logging
 import re
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import httpx
 from selectolax.parser import HTMLParser
+
+from src.config import get_settings
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +20,7 @@ if TYPE_CHECKING:
 EGRUL_API = "https://egrul.nic.ru"
 FSSP_API = "https://api-ip.fssprus.ru"
 KAD_API = "https://bssys.com"
+logger = logging.getLogger(__name__)
 
 
 def _d(value: str | None, default: Decimal = Decimal(0)) -> Decimal:
@@ -29,10 +32,10 @@ def _d(value: str | None, default: Decimal = Decimal(0)) -> Decimal:
         return default
 
 
-async def enrich_from_egrul(party: Party, session: AsyncSession) -> None:
+async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
     """Запрашивает ЕГРЮЛ / ЕГРИП по ИНН через egrul.nic.ru (free API)."""
-    if not party.inn:
-        return
+    if not party.inn or "egrul" not in get_settings().free_api_sources_list:
+        return False
 
     inn = party.inn
     url = f"https://egrul.nic.ru/search/?q={inn}&type=ul"
@@ -41,7 +44,7 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
-                return
+                return False
         tree = HTMLParser(resp.text)
 
         # Название
@@ -62,22 +65,23 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> None:
         if ogrn_m and not party.ogrn:
             party.ogrn = ogrn_m.group(1)
 
-        await session.commit()
+        return True
     except Exception:
-        pass
+        logger.exception("egrul enrichment failed for %s", party.inn)
+        return False
 
 
-async def enrich_from_fssp(party: Party, session: AsyncSession) -> None:
+async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
     """Запрашивает ФССП исполнительные производства по ИНН."""
-    if not party.inn:
-        return
+    if not party.inn or "fssp" not in get_settings().free_api_sources_list:
+        return False
 
     try:
         url = f"https://api-ip.fssprus.ru/api/v1.0/search/physical?query={party.inn}"
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
-                return
+                return False
             data = resp.json()
 
         results = data.get("result", [])
@@ -92,15 +96,16 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> None:
 
         party.fssp_sum = total_sum
         party.fssp_uncollectible = uncollectible_count > 0
-        await session.commit()
+        return True
     except Exception:
-        pass
+        logger.exception("fssp enrichment failed for %s", party.inn)
+        return False
 
 
-async def enrich_from_kad(party: Party, session: AsyncSession) -> None:
+async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
     """Запрашивает КАД арбитражные дела по ИНН."""
-    if not party.inn:
-        return
+    if not party.inn or "kad" not in get_settings().free_api_sources_list:
+        return False
 
     try:
         url = "https://kad.arbitr.ru/Kad/SearchCases"
@@ -118,7 +123,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload)
             if resp.status_code != 200:
-                return
+                return False
             data = resp.json()
 
         total = data.get("total", 0)
@@ -127,17 +132,16 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> None:
             "банкротств" in str(d).lower()
             for d in data.get("results", [])
         )
-        await session.commit()
+        return True
     except Exception:
-        pass
+        logger.exception("kad enrichment failed for %s", party.inn)
+        return False
 
 
-async def enrich_party(party: Party, session: AsyncSession) -> Party:
-    """Полное обогащение одного лица — все реестры параллельно."""
-    await asyncio.gather(
-        enrich_from_egrul(party, session),
-        enrich_from_fssp(party, session),
-        enrich_from_kad(party, session),
-        return_exceptions=True,
-    )
-    return party
+async def enrich_party(party: Party, session: AsyncSession) -> dict[str, bool]:
+    """Обогащает лицо без конкурентных commit одной SQLAlchemy-сессии."""
+    return {
+        "egrul": await enrich_from_egrul(party, session),
+        "fssp": await enrich_from_fssp(party, session),
+        "kad": await enrich_from_kad(party, session),
+    }

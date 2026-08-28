@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -40,6 +43,10 @@ class EtpFile:
     size: int | None = None
 
 
+class EtpAccessError(RuntimeError):
+    """ETP returned an access challenge or rate limit."""
+
+
 class EtpAdapter(ABC):
     """Абстрактный адаптер ЭТП."""
 
@@ -49,11 +56,15 @@ class EtpAdapter(ABC):
     def __init__(self, timeout: float = 30.0):
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
+        base_host = urlparse(self.base_url).hostname
+        self.allowed_hosts = {base_host} if base_host else set()
+        self.max_file_bytes = 25 * 1024 * 1024
+        self.max_redirects = 3
 
     async def __aenter__(self) -> EtpAdapter:
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "AR-Radar/1.0 (EtpAdapter)"},
         )
         return self
@@ -77,12 +88,58 @@ class EtpAdapter(ABC):
         raise NotImplementedError
 
     async def download_file(self, file: EtpFile) -> bytes:
-        """Скачивает содержимое файла."""
+        """Download a bounded file from an allowed public host."""
         if not self._client:
             raise RuntimeError("Adapter not initialized")
-        resp = await self._client.get(file.url)
-        resp.raise_for_status()
-        return resp.content
+
+        url = file.url
+        for redirect_count in range(self.max_redirects + 1):
+            await self._validate_download_url(url)
+            resp = await self._client.get(url, follow_redirects=False)
+            if 300 <= resp.status_code < 400:
+                location = resp.headers.get("location")
+                if not location or redirect_count >= self.max_redirects:
+                    raise RuntimeError("download redirect limit exceeded")
+                url = urljoin(url, location)
+                continue
+            resp.raise_for_status()
+            length = resp.headers.get("content-length")
+            if length:
+                try:
+                    declared_size = int(length)
+                except ValueError as exc:
+                    raise ValueError("invalid document size") from exc
+                if declared_size > self.max_file_bytes:
+                    raise ValueError("download exceeds configured size limit")
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > self.max_file_bytes:
+                    raise ValueError("download exceeds configured size limit")
+            return bytes(data)
+        raise RuntimeError("download redirect limit exceeded")
+
+    async def _validate_download_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if parsed.scheme not in {"http", "https"} or not host:
+            raise ValueError("document URL must use HTTP(S)")
+        if host.lower() not in {h.lower() for h in self.allowed_hosts}:
+            raise ValueError("document host is not in the adapter allowlist")
+
+        try:
+            addresses = await asyncio.to_thread(
+                lambda: {item[4][0] for item in socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)}
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError("document host cannot be resolved") from exc
+        for address in addresses:
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError as exc:
+                raise ValueError("document host returned an invalid address") from exc
+            if not ip.is_global:
+                raise ValueError("document host resolves to a non-public address")
 
     async def rate_limit(self, seconds: float = 1.0) -> None:
         await asyncio.sleep(seconds)

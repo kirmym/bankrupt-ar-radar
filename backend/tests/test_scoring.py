@@ -179,10 +179,10 @@ def test_class_a_with_judgment():
         lot_id=1,
         start_price=Decimal("100000"),
         current_price=Decimal("100000"),
-        nominal_claimed=Decimal("1000000"),
+            nominal_claimed=Decimal("1100000"),
         debtor=make_debtor(cash=Decimal("10000000")),
         claims=[make_claim(
-            principal=Decimal("1000000"),
+                principal=Decimal("1100000"),
             has_judgment=True,
             has_writ=True,
         )],
@@ -320,3 +320,65 @@ def test_gaps_when_no_debtor_inn():
     )
     result = compute_ev_and_class(inp)
     assert Gap.DEBTOR_INN_MISSING in result.gaps
+
+
+def test_purchase_price_is_subtracted_from_ev():
+    base = {
+        "lot_id": 1,
+        "nominal_claimed": Decimal("1000000"),
+        "debtor": make_debtor(cash=Decimal("10000000")),
+        "claims": [make_claim(principal=Decimal("1000000"), has_judgment=True, has_writ=True)],
+    }
+    cheap = compute_ev_and_class(ScoreInput(**base, current_price=Decimal("100000")))
+    expensive = compute_ev_and_class(ScoreInput(**base, current_price=Decimal("500000")))
+    assert expensive.ev < cheap.ev
+    assert expensive.max_bid >= Decimal(0)
+
+
+def test_missing_nominal_is_not_scored_as_start_price():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            start_price=Decimal("100000"),
+            current_price=Decimal("100000"),
+            debtor=make_debtor(),
+            claims=[],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert Gap.NOMINAL_MISSING in result.gaps
+
+
+def test_bundle_without_claim_details_is_blocked():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            start_price=Decimal("100000"),
+            current_price=Decimal("100000"),
+            nominal_claimed=Decimal("1000000"),
+            is_bundle=True,
+            debtor=make_debtor(),
+            claims=[],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.BUNDLE_NO_DETAIL in result.stop_factors
+
+
+def test_personal_claim_is_blocked():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("100000"),
+            nominal_claimed=Decimal("1000000"),
+            debtor=make_debtor(),
+            claims=[ClaimSchema(
+                id=1,
+                kind=ClaimKind.TRADE_AR,
+                principal=Decimal("1000000"),
+                personal_claim=True,
+            )],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.PERSONAL_CLAIM in result.stop_factors

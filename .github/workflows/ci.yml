@@ -24,16 +24,19 @@ jobs:
         run: pip install uv
 
       - name: Install deps
-        run: uv sync --frozen || uv sync
+        run: uv sync --locked --extra dev
 
       - name: Lint (ruff)
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Type check (mypy)
-        run: mypy src/ || true
+        run: uv run mypy src/
 
       - name: Tests
-        run: pytest -v
+        run: uv run pytest -v
+
+      - name: Build wheel
+        run: uv run python -m hatchling build -t wheel
 
   web:
     runs-on: ubuntu-latest
@@ -52,7 +55,7 @@ jobs:
         run: npm ci
 
       - name: Lint
-        run: npm run lint || true
+        run: npm run lint
 
       - name: Build
         run: npm run build

@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 def fmt_money(value: Decimal | float | int | None) -> str:
     if value is None:
         return "—"
-    return f"{int(value):,}".replace(",", " ") + " ₽"
+    try:
+        return f"{Decimal(str(value)):,.0f}".replace(",", " ") + " ₽"
+    except (ValueError, TypeError, ArithmeticError):
+        return "—"
 
 
 def fmt_class(cls: str | None) -> str:
@@ -43,24 +46,30 @@ def fmt_scenario(s: str | None) -> str:
 async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
     """Запрос к API: ленты лотов класса A/B с EV > 0."""
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(
-            f"{base_url}/api/v1/lots",
-            params={
-                "page": 1,
-                "page_size": limit,
-                # фильтруем по минимальному EV (10_000_000 = 10 млн)
-                "min_ev": 0,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("items", [])
+        headers = {"X-API-Key": settings.api_auth_token} if settings.api_auth_token else {}
+        lots: list[dict] = []
+        for score_class in ("A", "B"):
+            resp = await client.get(
+                f"{base_url.rstrip('/')}/api/v1/lots",
+                params={"page": 1, "page_size": limit, "min_ev": 0, "score_class": score_class},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            lots.extend(resp.json().get("items", []))
+        return sorted(
+            lots,
+            key=lambda lot: Decimal(str(lot.get("score_ev") or 0)),
+            reverse=True,
+        )[:limit]
+
+
+def _is_allowed(message: types.Message) -> bool:
+    allowed = settings.telegram_allowed_user_ids_list
+    return not allowed or bool(message.from_user and message.from_user.id in allowed)
 
 
 async def send_alert(bot: Bot, chat_id: str, lot: dict) -> None:
     """Шлёт срочный алерт по одному лоту."""
-    debtor = lot.get("claims", [{}])[0].get("debtor_party", {}) if lot.get("claims") else {}
-
     text = (
         f"🚨 *Новый ликвидный лот!*\n\n"
         f"📌 *Класс:* {fmt_class(lot.get('score_class'))}\n"
@@ -69,22 +78,22 @@ async def send_alert(bot: Bot, chat_id: str, lot: dict) -> None:
         f"🏷 *Цена сейчас:* {fmt_money(lot.get('current_price'))}\n"
         f"🎯 *Max bid:* {fmt_money(lot.get('score_max_bid'))}\n"
         f"🛠 *Сценарий:* {fmt_scenario(lot.get('score_scenario'))}\n"
-        f"🏢 *Дебитор:* {debtor.get('name', '—')} "
-        f"(ИНН {debtor.get('inn', '—')})\n"
         f"💼 *Номинал:* {fmt_money(lot.get('nominal_claimed'))}\n"
-        f"⏰ *До конца интервала:* {lot.get('current_interval_to', '—')[:16]}\n\n"
+        f"⏰ *До конца интервала:* {str(lot.get('current_interval_to') or '—')[:16]}\n\n"
     )
 
     stop_factors = lot.get("score_stop_factors", [])
     if stop_factors:
         text += f"⚠️ *Стоп-факторы:* {', '.join(stop_factors)}\n\n"
 
-    text += f"🔗 [Открыть в API](http://localhost:8000/api/v1/lots/{lot.get('id')})"
+    text += f"🔗 [Открыть в API]({settings.api_base_url.rstrip('/')}/api/v1/lots/{lot.get('id')})"
 
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_start(message: types.Message) -> None:
+    if not _is_allowed(message):
+        return
     await message.answer(
         "👋 *AR Radar Bot*\n\n"
         "Бот присылает алерты по ликвидным лотам публичного предложения.\n\n"
@@ -96,6 +105,8 @@ async def cmd_start(message: types.Message) -> None:
 
 
 async def cmd_top(message: types.Message) -> None:
+    if not _is_allowed(message):
+        return
     try:
         lots = await fetch_lots_a_b(settings.api_base_url, limit=10)
     except Exception as e:
@@ -108,23 +119,19 @@ async def cmd_top(message: types.Message) -> None:
 
     lines = ["📈 *Топ лотов по EV:*\n"]
     for lot in lots[:10]:
-        debtor = (
-            lot.get("claims", [{}])[0].get("debtor_party", {})
-            if lot.get("claims")
-            else {}
-        )
         lines.append(
             f"{fmt_class(lot.get('score_class'))} "
             f"EV={fmt_money(lot.get('score_ev'))} "
             f"цена={fmt_money(lot.get('current_price'))}\n"
-            f"  🏢 {debtor.get('name', '—')[:50]}\n"
-            f"  📅 до {lot.get('current_interval_to', '—')[:16]}\n"
+            f"  📅 до {str(lot.get('current_interval_to') or '—')[:16]}\n"
         )
 
     await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_help(message: types.Message) -> None:
+    if not _is_allowed(message):
+        return
     await message.answer(
         "ℹ️ *AR Radar*\n\n"
         "Радар мониторит торги по банкротству в РФ и находит ликвидные лоты "

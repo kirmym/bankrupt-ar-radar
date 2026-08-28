@@ -8,36 +8,44 @@ export default function LotList() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "A" | "B" | "C" | "D">("all");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pages, setPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
+    setError(null);
+    const params: Record<string, unknown> = { page, page_size: 20 };
+    if (filter !== "all") params.score_class = filter;
+    if (search.trim()) params.search = search.trim();
     lotsApi
-      .list({ page: 1, page_size: 100 })
-      .then((r) => setLots(r.data.items))
-      .catch(() => setLots([]))
+      .list(params)
+      .then((r) => {
+        setLots(r.data.items);
+        setPages(r.data.pages);
+        setTotal(r.data.total);
+      })
+      .catch((e) => {
+        setLots([]);
+        setPages(1);
+        setTotal(0);
+        setError(e instanceof Error ? e.message : "Не удалось загрузить лоты");
+      })
       .finally(() => setLoading(false));
-  }, []);
+  }, [filter, page, search]);
 
-  const filtered = lots.filter((lot) => {
-    if (filter !== "all" && lot.score_class !== filter) return false;
-    if (search) {
-      const s = search.toLowerCase();
-      const titleMatch = (lot.title || "").toLowerCase().includes(s);
-      const innMatch = (lot.claims?.[0]?.debtor_party?.inn || "").includes(s);
-      const nameMatch = (lot.claims?.[0]?.debtor_party?.name || "")
-        .toLowerCase()
-        .includes(s);
-      if (!titleMatch && !innMatch && !nameMatch) return false;
-    }
-    return true;
-  });
+  const changeFilter = (next: typeof filter) => {
+    setFilter(next);
+    setPage(1);
+  };
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">Лента лотов</h1>
         <div className="text-sm text-slate-500">
-          {filtered.length} лот(ов)
+          {total} лот(ов)
         </div>
       </div>
 
@@ -47,13 +55,16 @@ export default function LotList() {
           placeholder="Поиск по ИНН / названию / описанию…"
           className="px-3 py-1.5 border border-slate-300 rounded text-sm flex-1 min-w-64"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
         />
         <div className="flex gap-1">
           {(["all", "A", "B", "C", "D"] as const).map((c) => (
             <button
               key={c}
-              onClick={() => setFilter(c)}
+              onClick={() => changeFilter(c)}
               className={`px-3 py-1.5 text-sm rounded ${
                 filter === c
                   ? "bg-slate-900 text-white"
@@ -66,15 +77,36 @@ export default function LotList() {
         </div>
       </div>
 
-      {loading ? (
+      {error ? (
+        <div className="p-6 bg-red-50 border border-red-200 rounded text-red-800">
+          Не удалось загрузить лоты: {error}
+        </div>
+      ) : loading ? (
         <div className="p-6 text-slate-500">Загрузка…</div>
-      ) : filtered.length === 0 ? (
+      ) : lots.length === 0 ? (
         <EmptyState />
       ) : (
         <div className="space-y-2">
-          {filtered.map((lot) => (
+          {lots.map((lot) => (
             <LotRow key={lot.id} lot={lot} />
           ))}
+          <div className="flex items-center justify-between pt-2 text-sm text-slate-600">
+            <button
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="px-3 py-1.5 rounded border border-slate-300 disabled:opacity-40"
+            >
+              ← Назад
+            </button>
+            <span>Страница {page} из {pages}</span>
+            <button
+              disabled={page >= pages}
+              onClick={() => setPage((current) => Math.min(pages, current + 1))}
+              className="px-3 py-1.5 rounded border border-slate-300 disabled:opacity-40"
+            >
+              Далее →
+            </button>
+          </div>
         </div>
       )}
     </div>

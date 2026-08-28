@@ -54,7 +54,7 @@ export default function Dashboard() {
       <div className="bg-white p-4 rounded shadow-sm border border-slate-200">
         <h3 className="font-semibold text-slate-900">Что делать дальше</h3>
         <ul className="mt-2 text-sm text-slate-700 space-y-1 list-disc list-inside">
-          <li>Настройте <code className="text-xs">EFRSB_API_TOKEN</code> в .env</li>
+          <li>Для ingest используется публичный HTML-парсер ЕФРСБ; платный API не требуется</li>
           <li>Запустите ingest: <code className="text-xs">python -m src.cli ingest</code></li>
           <li>Обогатите дебиторов: <code className="text-xs">python -m src.cli enrich</code></li>
           <li>Пересчитайте скоринг: <code className="text-xs">python -m src.cli score</code></li>

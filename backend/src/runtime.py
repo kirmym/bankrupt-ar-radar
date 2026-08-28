@@ -59,6 +59,12 @@ async def _files_once() -> None:
     await run_files()
 
 
+async def _etp_once() -> None:
+    from src.workers.etp_worker import run_etp_refresh
+
+    await run_etp_refresh()
+
+
 async def _alerts_once() -> None:
     from src.workers.alert_worker import run_alerts
 
@@ -73,6 +79,7 @@ def start_background_tasks() -> list[asyncio.Task]:
     tasks.append(asyncio.create_task(_loop("enrich", _enrich_once, settings.enrich_interval_minutes)))
     tasks.append(asyncio.create_task(_loop("score", _score_once, settings.score_interval_minutes)))
     tasks.append(asyncio.create_task(_loop("files", _files_once, 15)))
+    tasks.append(asyncio.create_task(_loop("etp", _etp_once, 15)))
     tasks.append(asyncio.create_task(_loop("alerts", _alerts_once, settings.alert_interval_minutes)))
 
     return tasks

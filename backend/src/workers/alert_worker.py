@@ -8,12 +8,12 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from src.config import get_settings
 from src.database import async_session_factory
-from src.models.entities import AlertState, Lot
-from src.models.enums import LotClass
+from src.models.entities import AlertState, Lot, Trade
+from src.models.enums import LotClass, TradeStatus
 from src.telegram import fmt_lot_message, send_message
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,25 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
     async with async_session_factory() as session:
         stmt = (
             select(Lot)
+            .join(Trade, Lot.trade_id == Trade.id)
             .where(Lot.is_receivable == True)  # noqa: E712
             .where(Lot.score_class.in_([LotClass.A.value, LotClass.B.value]))
             .where(Lot.score_ev > 0)
+            .where(
+                Trade.status.in_(
+                    [
+                        TradeStatus.ANNOUNCED.value,
+                        TradeStatus.APPLICATIONS_OPEN.value,
+                        TradeStatus.IN_PROGRESS.value,
+                    ]
+                )
+            )
+            .where(
+                or_(
+                    Lot.current_interval_to.is_(None),
+                    Lot.current_interval_to > datetime.now(UTC),
+                )
+            )
             .order_by(Lot.score_ev.desc())
             .limit(limit * 3)
         )
@@ -71,17 +87,8 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     "nominal_claimed": lot.nominal_claimed,
                     "current_interval_to": lot.current_interval_to,
                     "score_stop_factors": lot.score_stop_factors,
-                    "claims": [
-                        {
-                            "debtor_party": (
-                                {
-                                    "name": c.debtor_party.name if c.debtor_party else None,
-                                    "inn": c.debtor_party.inn if c.debtor_party else None,
-                                }
-                                for c in lot.claims
-                            )
-                        }
-                    ],
+                    # Имена и ИНН не отправляем во внешний Telegram API.
+                    "claims": [],
                 }
             )
             if await send_message(text):

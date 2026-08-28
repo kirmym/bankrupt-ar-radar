@@ -9,14 +9,15 @@ import logging
 import time
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from src.api.security import require_api_access
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_access)])
 
 # (имя, URL, считать ли критичным для работы радара)
 SOURCES: list[tuple[str, str, bool]] = [
@@ -39,7 +40,14 @@ async def _check(client: httpx.AsyncClient, name: str, url: str, critical: bool)
         return {
             "source": name,
             "url": url,
-            "ok": resp.status_code < 500,
+            "ok": 200 <= resp.status_code < 300,
+            "state": (
+                "ok"
+                if 200 <= resp.status_code < 300
+                else "challenge"
+                if resp.status_code in (403, 429)
+                else "error"
+            ),
             "status_code": resp.status_code,
             "latency_ms": elapsed_ms,
             "critical": critical,
@@ -52,6 +60,7 @@ async def _check(client: httpx.AsyncClient, name: str, url: str, critical: bool)
             "ok": False,
             "status_code": None,
             "latency_ms": elapsed_ms,
+            "state": "error",
             "error": type(exc).__name__,
             "critical": critical,
         }

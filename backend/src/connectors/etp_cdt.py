@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from selectolax.parser import HTMLParser
 
-from src.connectors.etp_base import EtpAdapter, EtpFile, EtpLotUpdate
+from src.connectors.etp_base import EtpAccessError, EtpAdapter, EtpFile, EtpLotUpdate
 
 if TYPE_CHECKING:
     pass
@@ -62,6 +62,8 @@ class CdtAdapter(EtpAdapter):
 
         await self.rate_limit(0.5)
         resp = await self._client.get(url)
+        if resp.status_code in (401, 403, 429):
+            raise EtpAccessError(f"ETP access status={resp.status_code}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -111,6 +113,8 @@ class CdtAdapter(EtpAdapter):
 
         await self.rate_limit(0.5)
         resp = await self._client.get(url)
+        if resp.status_code in (401, 403, 429):
+            raise EtpAccessError(f"ETP access status={resp.status_code}")
         if resp.status_code == 404:
             return []
         resp.raise_for_status()

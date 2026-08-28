@@ -187,6 +187,7 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     # ── 3. Требования ────────────────────────────────────────────────────────
     total_principal = Decimal(0)
     total_with_penalties = Decimal(0)
+    best_principal = Decimal("-1")
     best_claim_has_judgment = False
     best_claim_has_writ = False
     best_enforcement_alive = False
@@ -195,6 +196,9 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     best_claim_counterclaim_risk = False
     best_secured = False
     best_kind = "unknown"
+    best_claim_personal = False
+    best_claim_assignment_forbidden = False
+    best_claim_counterclaim = False
 
     for claim in inp.claims:
         principal = _d(claim.principal)
@@ -202,7 +206,8 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         total_principal += principal
         total_with_penalties += principal + penalties
 
-        if principal > total_principal - principal:  # keep the largest
+        if principal > best_principal:
+            best_principal = principal
             if claim.has_judgment:
                 best_claim_has_judgment = True
             if claim.has_writ:
@@ -214,6 +219,9 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             best_claim_counterclaim_risk = claim.counterclaim_risk
             best_secured = claim.secured
             best_kind = claim.kind.value
+            best_claim_personal = claim.personal_claim
+            best_claim_assignment_forbidden = claim.assignment_forbidden
+            best_claim_counterclaim = claim.counterclaim_risk
 
     # ── 4. Стоп-факторы ──────────────────────────────────────────────────────
     today = date.today()
@@ -227,6 +235,13 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
 
     if best_il_present_deadline and best_il_present_deadline < today:
         stop_factors.append(StopFactor.IL_PRESENT_EXPIRED)
+
+    if best_claim_personal:
+        stop_factors.append(StopFactor.PERSONAL_CLAIM)
+    if best_claim_assignment_forbidden:
+        stop_factors.append(StopFactor.ASSIGNMENT_FORBIDDEN)
+    if best_claim_counterclaim:
+        stop_factors.append(StopFactor.COUNTERCLAIM_RISK)
 
     # ── 5. Определение сценария ──────────────────────────────────────────────
     if inp.scenario_override:
@@ -281,22 +296,27 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         best_claim_counterclaim_risk,
         debtor.cash if debtor else None,
         debtor.equity if debtor else None,
-        debtor.fssp_uncollectible if debtor else False,
-        debtor.kad_bankruptcy_open if debtor else False,
+        bool(debtor.fssp_uncollectible) if debtor else False,
+        bool(debtor.kad_bankruptcy_open) if debtor else False,
     )
 
     # ── 8. Выбор базы ────────────────────────────────────────────────────────
     # Приоритет: номинал → сумма требований → start_price
     if total_principal > 0:
         base = total_principal
+    elif inp.is_bundle:
+        base = Decimal(0)
+        gaps.append(Gap.BUNDLE_NO_DETAIL)
+        stop_factors.append(StopFactor.BUNDLE_NO_DETAIL)
     elif inp.nominal_claimed and inp.nominal_claimed > 0:
         base = inp.nominal_claimed
         gaps.append(Gap.NOMINAL_ESTIMATED)
-    elif inp.is_bundle:
-        base = _d(inp.start_price)
-        gaps.append(Gap.BUNDLE_NO_DETAIL)
+    elif inp.nominal_claimed is None or inp.nominal_claimed <= 0:
+        base = Decimal(0)
+        gaps.append(Gap.NOMINAL_MISSING)
     else:
-        base = _d(inp.start_price)
+        base = Decimal(0)
+        gaps.append(Gap.NOMINAL_MISSING)
 
     # ── 9. Дисконт по сценарию ───────────────────────────────────────────────
     if scenario == Scenario.ENFORCEMENT:
@@ -309,23 +329,25 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         discount = Decimal(settings.default_discount_d)
 
     # ── 10. EV ───────────────────────────────────────────────────────────────
-    ev_optimistic = base * discount * success_rate - cost
-    ev_low_raw = base * Decimal("0.3") * success_rate - cost
-    ev_high_raw = base * discount * min(Decimal("1.0"), success_rate + Decimal("0.1")) - cost
+    purchase_price = current_price
+    annual_rate = _d(settings.alternative_rate)
+    time_cost = purchase_price * annual_rate * Decimal(med_months) / Decimal(12)
+    pessimistic_time_cost = purchase_price * annual_rate * Decimal(pessim_months) / Decimal(12)
+    ev_optimistic = base * discount * success_rate - purchase_price - cost - time_cost
+    ev_low_raw = base * Decimal("0.3") * success_rate - purchase_price - cost - pessimistic_time_cost
+    ev_high_raw = (
+        base * discount * min(Decimal("1.0"), success_rate + Decimal("0.1"))
+        - purchase_price
+        - cost
+        - time_cost
+    )
 
-    # Дисконт от текущей цены
-    if current_price > 0:
-        ev_from_price = current_price * success_rate - cost
-        ev_optimistic = max(ev_optimistic, ev_from_price)
-
-    ev_optimistic = max(Decimal(0), ev_optimistic.quantize(Decimal("1"), ROUND_HALF_UP))
-    ev_low = max(Decimal(0), ev_low_raw.quantize(Decimal("1"), ROUND_HALF_UP))
-    ev_high = max(Decimal(0), ev_high_raw.quantize(Decimal("1"), ROUND_HALF_UP))
+    ev_optimistic = ev_optimistic.quantize(Decimal("1"), ROUND_HALF_UP)
+    ev_low = ev_low_raw.quantize(Decimal("1"), ROUND_HALF_UP)
+    ev_high = ev_high_raw.quantize(Decimal("1"), ROUND_HALF_UP)
 
     # ── 11. Класс ────────────────────────────────────────────────────────────
-    if LotClass.D.value in [StopFactor.DEBTOR_EXCLUDED, StopFactor.DEBTOR_LIQUIDATION]:
-        cls = LotClass.D
-    elif stop_factors:
+    if stop_factors:
         cls = LotClass.D
     elif ev_optimistic >= Decimal("500000") and success_rate >= Decimal("0.5"):
         cls = LotClass.A
@@ -338,7 +360,7 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
 
     # ── 12. Max Bid ──────────────────────────────────────────────────────────
     # Не покупать выше чем EV * 0.5
-    max_bid = (ev_optimistic * Decimal("0.5")).quantize(Decimal("1"), ROUND_HALF_UP)
+    max_bid = max(Decimal(0), ev_optimistic * Decimal("0.5")).quantize(Decimal("1"), ROUND_HALF_UP)
     # Если есть cutoff — не выше него
     if cutoff > 0:
         max_bid = min(max_bid, cutoff)

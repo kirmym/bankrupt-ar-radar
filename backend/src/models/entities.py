@@ -5,6 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from datetime import date as _date
 from decimal import Decimal
+from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
@@ -18,9 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import (
-    Enum as SAEnum,
-)
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -40,6 +39,17 @@ from src.models.enums import (
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def enum_string(enum_cls: type[StrEnum], length: int) -> SAEnum:
+    """Store enum values as VARCHAR, matching the existing Alembic schema."""
+    return SAEnum(
+        enum_cls,
+        name=f"{enum_cls.__name__.lower()}_enum",
+        values_callable=lambda members: [member.value for member in members],
+        native_enum=False,
+        length=length,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,15 +75,15 @@ class Trade(Base):
     etp_url: Mapped[str | None] = mapped_column(String(500))
 
     trade_kind: Mapped[str] = mapped_column(
-        SAEnum(TradeKind, name="trade_kind_enum"),
+        enum_string(TradeKind, 30),
         default=TradeKind.PUBLIC_OFFER.value,
     )
     trade_form: Mapped[str | None] = mapped_column(
-        SAEnum(TradeForm, name="trade_form_enum")
+        enum_string(TradeForm, 20)
     )
     is_repeat: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(
-        SAEnum(TradeStatus, name="trade_status_enum"),
+        enum_string(TradeStatus, 30),
         default=TradeStatus.ANNOUNCED.value,
     )
 
@@ -173,13 +183,13 @@ class Lot(Base):
     docs_on_etp: Mapped[bool] = mapped_column(Boolean, default=False)
 
     score_class: Mapped[str | None] = mapped_column(
-        SAEnum(LotClass, name="lot_class_enum")
+        enum_string(LotClass, 2)
     )
     score_ev: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     score_ev_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     score_ev_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     score_scenario: Mapped[str | None] = mapped_column(
-        SAEnum(Scenario, name="scenario_enum")
+        enum_string(Scenario, 30)
     )
     score_stop_factors: Mapped[list[str]] = mapped_column(
         ARRAY(String(50)), default=list
@@ -252,16 +262,16 @@ class Party(Base):
         UUID(as_uuid=True), unique=True, default=uuid.uuid4
     )
 
-    role: Mapped[str] = mapped_column(SAEnum(PartyRole, name="party_role_enum"))
+    role: Mapped[str] = mapped_column(enum_string(PartyRole, 20))
     person_kind: Mapped[str | None] = mapped_column(
-        SAEnum(PersonKind, name="person_kind_enum")
+        enum_string(PersonKind, 10)
     )
     inn: Mapped[str | None] = mapped_column(String(12), index=True)
     ogrn: Mapped[str | None] = mapped_column(String(15))
     name: Mapped[str | None] = mapped_column(String(500))
 
     status: Mapped[str | None] = mapped_column(
-        SAEnum(OrgStatus, name="org_status_enum")
+        enum_string(OrgStatus, 20)
     )
     reg_date: Mapped[_date | None] = mapped_column(Date)
 
@@ -337,7 +347,7 @@ class Claim(Base):
     lot: Mapped[Lot] = relationship("Lot", back_populates="claims")
 
     kind: Mapped[str] = mapped_column(
-        SAEnum(ClaimKind, name="claim_kind_enum"), default=ClaimKind.UNKNOWN.value
+        enum_string(ClaimKind, 30), default=ClaimKind.UNKNOWN.value
     )
 
     principal: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
@@ -429,13 +439,13 @@ class ScoreSnapshot(Base):
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
     lot: Mapped[Lot] = relationship("Lot", back_populates="score_snapshots")
 
-    score_class: Mapped[str] = mapped_column(SAEnum(LotClass, name="snapshot_class_enum"))
+    score_class: Mapped[str] = mapped_column(enum_string(LotClass, 2))
     ev: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     ev_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     ev_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     max_bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     scenario: Mapped[str | None] = mapped_column(
-        SAEnum(Scenario, name="snapshot_scenario_enum")
+        enum_string(Scenario, 30)
     )
     stop_factors: Mapped[list[str]] = mapped_column(ARRAY(String(50)), default=list)
     gaps: Mapped[list[str]] = mapped_column(ARRAY(String(50)), default=list)
@@ -463,6 +473,35 @@ class RawSnapshot(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (Index("ix_raw_snapshots_source", "source"),)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ImportRun / ImportCheckpoint — наблюдаемость и возобновление ingest
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ImportRun(Base):
+    __tablename__ = "import_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(50), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_page: Mapped[int] = mapped_column(Integer, default=0)
+    items_seen: Mapped[int] = mapped_column(Integer, default=0)
+    items_upserted: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(50))
+    error_message: Mapped[str | None] = mapped_column(String(500))
+
+
+class ImportCheckpoint(Base):
+    __tablename__ = "import_checkpoints"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(50), unique=True)
+    cursor: Mapped[str | None] = mapped_column(String(200))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

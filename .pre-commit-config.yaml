@@ -1,4 +1,4 @@
-"""Pre-commit config."""
+# Pre-commit config.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.7.0

@@ -8,10 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install uv
 
-COPY bot/pyproject.toml bot/
-RUN uv sync --frozen --no-install-project
-
-COPY bot/ /app
+COPY bot/pyproject.toml ./pyproject.toml
+COPY bot/src ./src
+RUN pip install --no-cache-dir .
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

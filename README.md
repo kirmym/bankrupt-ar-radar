@@ -29,7 +29,8 @@
    | `ENABLE_BOT` | `false` |
    | `TELEGRAM_BOT_TOKEN` | токен от @BotFather (для алертов) |
    | `TELEGRAM_CHAT_IDS` | ваш chat_id |
-   | `EFRSB_API_TOKEN` | после договора с ЕФРСБ (пока ingest в холде) |
+   | `API_AUTH_TOKEN` | секрет `X-API-Key` для feedback и диагностики |
+   | `FREE_API_SOURCES` | только подтверждённые бесплатные API, например `fssp`; пусто отключает API |
 
 6. **Settings → Networking → Generate Domain** — получите публичный URL.
 7. Пуш в `main` → авто-редеплой.
@@ -37,6 +38,7 @@
 ### Проверка после деплоя
 
 - `https://<ваш-домен>/health` → `{"status": "ok"}`
+- `https://<ваш-домен>/ready` → проверка доступности PostgreSQL
 - `https://<ваш-домен>/` → веб-дашборд
 - `https://<ваш-домен>/docs` → Swagger API
 
@@ -144,14 +146,15 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/api/v1/lots` | GET | Лента лотов с фильтрами |
 | `/api/v1/lots/{id}` | GET | Карточка лота |
 | `/api/v1/stats` | GET | Дашборд-агрегаты |
+| `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
 | `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought) |
 | `/docs` | GET | Swagger UI |
 
-Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `trade_status`, `page`/`page_size`.
+Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `page`/`page_size`.
 
 ## Telegram-алерты
 
-При заполненных `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS` alert-воркер раз в 30 минут проверяет лоты класса A/B с EV > 0 и шлёт в Telegram (дедупликация — один лот не чаще раза в сутки, состояние в таблице `alerts_state`).
+При заполненных `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS` alert-воркер раз в 30 минут проверяет лоты класса A/B с EV > 0 и шлёт в Telegram (дедупликация — один лот не чаще раза в сутки, состояние в таблице `alerts_state`). Внешнему Telegram API передаются финансовые показатели лота, без имени и ИНН дебитора.
 
 Интерактивный бот (`/top`, `/start`) — опциональный отдельный сервис из `bot/` (можно задеплоить вторым сервисом с тем же репо, root `bot/Dockerfile`).
 
@@ -159,11 +162,11 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 
 | Источник | Что | Статус |
 |---|---|---|
-| ЕФРСБ (REST при договоре) | торги публичного предложения | 🚧 нужен `EFRSB_API_TOKEN` |
-| ЕГРЮЛ/ЕГРИП | статус, директор, ОГРН | ✅ best-effort |
+| ЕФРСБ (публичный HTML) | торги публичного предложения | ✅ разрешённый парсер; API не требуется |
+| ЕГРЮЛ/ЕГРИП | статус, директор, ОГРН | ⚙️ только при явном разрешении в `FREE_API_SOURCES` |
 | ГИР БО (bo.nalog.ru) | выручка, чистые активы | 🚧 v0 |
-| КАД (kad.arbitr.ru) | дела, банкротство дебитора | ✅ best-effort |
-| ФССП (api-ip.fssprus.ru) | исполнительные производства | ✅ (нужен токен) |
+| КАД (kad.arbitr.ru) | дела, банкротство дебитора | ⚙️ только при явном разрешении в `FREE_API_SOURCES` |
+| ФССП (api-ip.fssprus.ru) | исполнительные производства | ⚙️ только при явном разрешении в `FREE_API_SOURCES` |
 | ЭТП ЦДТ, Сбербанк-АСТ | цена, deadline, файлы | ✅ (этап 2) |
 | OpenAI | LLM-факты из PDF | ✅ (опция) |
 
@@ -171,7 +174,7 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 
 ```bash
 cd backend
-pytest        # 38 кейсов: scoring, ИНН-экстрактор, факты из файлов
+pytest        # backend regression suite
 ruff check src/ tests/
 ```
 

@@ -93,6 +93,8 @@ class Gap(StrEnum):
     FSSP_MISSING = "fssp_missing"
     SCHEDULE_UNPARSED = "schedule_unparsed"
     NOMINAL_ESTIMATED = "nominal_estimated"  # Номинал взят из start_price
+    NOMINAL_MISSING = "nominal_missing"
+    BUNDLE_NO_DETAIL = "bundle_no_detail"
 
 
 # Белый список классификаторов ЕФРСБ для дебиторской задолженности

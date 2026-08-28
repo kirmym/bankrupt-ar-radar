@@ -3,14 +3,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from decimal import Decimal
+from datetime import UTC, datetime
 
 from selectolax.parser import HTMLParser
 from sqlalchemy import select
 
 from src.config import get_settings
-from src.models.entities import Lot, Party, Trade
+from src.connectors.efrsb import (
+    SourceAccessError,
+    SourceParseError,
+    extract_debtor_inn,
+    fetch_page,
+    iter_all_public_offers,
+    parse_lot_card,
+    parse_price,
+)
+from src.models.entities import ImportCheckpoint, ImportRun, Lot, Party, RawSnapshot, Trade
 from src.models.enums import (
     DZ_CLASSIFIER_CODES,
     DZ_CLASSIFIER_KEYWORDS,
@@ -77,19 +85,6 @@ def parse_classifier(html: str) -> tuple[list[str], list[str]]:
     return codes, labels
 
 
-def parse_price(text: str) -> Decimal | None:
-    """Парсит цену из текста вида '12 345,67 руб.'."""
-    if not text:
-        return None
-    clean = re.sub(r"[^\d.,]", "", text)
-    if not clean:
-        return None
-    try:
-        return Decimal(clean.replace(",", "."))
-    except Exception:
-        return None
-
-
 async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     """Создаёт или обновляет торги + лот в БД."""
     if not card.get("efrsb_url"):
@@ -109,6 +104,18 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         )
         db.add(trade)
         await db.flush()
+
+    raw_content = card.get("raw_content")
+    if isinstance(raw_content, str) and raw_content:
+        snapshot = RawSnapshot(
+            source="efrsb_public",
+            source_url=card["efrsb_url"],
+            content_type="text/html",
+            raw_content=raw_content[:1_000_000],
+        )
+        db.add(snapshot)
+        await db.flush()
+        trade.raw_snapshot_id = snapshot.id
 
     # Лот
     lot_no = card.get("lot_no", 1)
@@ -135,6 +142,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     lot.nominal_claimed = card.get("nominal_claimed")
     lot.deposit_amount = card.get("deposit_amount")
     lot.deposit_percent = card.get("deposit_percent")
+    lot.bundle_flag = bool(card.get("bundle_flag", False))
 
     lot.classifier_codes = card.get("classifier_codes", [])
     lot.classifier_labels = card.get("classifier_labels", [])
@@ -200,18 +208,126 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
 async def run_ingest() -> int:
     """Главный цикл ingest. Возвращает количество обработанных лотов."""
     logger.info("ingest: starting")
+    from src.database import get_db_context
 
-    # TODO: Когда появится EFRSB_API_TOKEN — переключить на REST
-    # Сейчас заглушка: читаем тестовый поток.
-    if not settings.efrsb_api_token:
-        logger.warning(
-            "ingest: no EFRSB_API_TOKEN, skipping (configure after signing contract)"
+    processed = 0
+    async with get_db_context() as db:
+        previous_run = (
+            await db.execute(
+                select(ImportRun)
+                .where(ImportRun.source == "efrsb_public")
+                .order_by(ImportRun.started_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        checkpoint = await db.scalar(
+            select(ImportCheckpoint).where(ImportCheckpoint.source == "efrsb_public")
         )
-        return 0
-
-    # ... настоящий цикл ingest через REST API ...
-
-    return 0
+        start_page = 1
+        if previous_run and previous_run.status in {"paused", "failed"} and checkpoint:
+            try:
+                start_page = max(1, int(checkpoint.cursor or "1"))
+            except ValueError:
+                start_page = 1
+        run = ImportRun(source="efrsb_public", status="running")
+        db.add(run)
+        await db.flush()
+        await db.commit()
+        try:
+            async for item in iter_all_public_offers(
+                max_pages=settings.ingest_max_pages,
+                per_page=settings.ingest_page_size,
+                start_page=start_page,
+            ):
+                run.items_seen += 1
+                title = item.get("title") or ""
+                description = item.get("description_text") or item.get("description")
+                props: dict[str, str] = {}
+                raw_content: str | None = None
+                if item.get("url"):
+                    try:
+                        raw_content = await fetch_page(item["url"])
+                        detail = parse_lot_card(raw_content, item["url"])
+                        title = detail.get("title") or title
+                        description = detail.get("description") or description
+                        props = detail.get("props") or {}
+                    except SourceAccessError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "ingest: detail parse failed for %s: %s",
+                            item.get("url"),
+                            type(exc).__name__,
+                        )
+                start_price = parse_price(item.get("price_text") or "")
+                nominal = next(
+                    (
+                        parse_price(value)
+                        for key, value in props.items()
+                        if "номин" in key.lower() and parse_price(value) is not None
+                    ),
+                    None,
+                )
+                card = {
+                    "efrsb_url": item.get("url"),
+                    "lot_no": item.get("lot_no", 1),
+                    "title": title,
+                    "description_text": description,
+                    "start_price": start_price,
+                    "current_price": start_price,
+                    "nominal_claimed": nominal,
+                    "raw_content": raw_content,
+                    "debtor_inn": extract_debtor_inn(description, title),
+                    "is_receivable": await is_receivable_lot([], [], description, title),
+                    "bundle_flag": any(
+                        marker in f"{title} {description or ''}".lower()
+                        for marker in ("единый лот", "корзина требований", "в составе лота")
+                    ),
+                }
+                saved = await persist_trade_and_lot(card, db)
+                if saved:
+                    processed += 1
+                    run.items_upserted += 1
+                page = int(item.get("source_page") or run.last_page or 1)
+                run.last_page = max(run.last_page, page)
+                checkpoint = await db.scalar(
+                    select(ImportCheckpoint).where(
+                        ImportCheckpoint.source == "efrsb_public"
+                    )
+                )
+                if checkpoint is None:
+                    checkpoint = ImportCheckpoint(source="efrsb_public")
+                    db.add(checkpoint)
+                checkpoint.cursor = str(run.last_page)
+                checkpoint.updated_at = datetime.now(UTC)
+                # Durable progress prevents a process restart from hiding work already seen.
+                await db.commit()
+            run.status = "finished"
+            run.finished_at = datetime.now(UTC)
+            logger.info("ingest: processed %d public offers", processed)
+            await db.commit()
+        except SourceParseError as exc:
+            run.status = "failed"
+            run.error_code = "parse_error"
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            logger.error("ingest: parser contract failed: %s", exc)
+        except SourceAccessError as exc:
+            run.status = "paused"
+            run.error_code = "source_access"
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            logger.warning("ingest: source access paused: %s", exc)
+        except Exception as exc:
+            run.status = "failed"
+            run.error_code = type(exc).__name__[:50]
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            raise
+    return processed
 
 
 async def main() -> None:

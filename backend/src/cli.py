@@ -63,6 +63,18 @@ def score() -> None:
 
 
 @app.command()
+def etp_refresh() -> None:
+    """Обновить цену и статус лотов с поддержанных ЭТП."""
+    from src.workers.etp_worker import run_etp_refresh
+
+    async def _run() -> None:
+        count = await run_etp_refresh()
+        console.print(f"✓ ETP refresh: {count} lots", style="green")
+
+    asyncio.run(_run())
+
+
+@app.command()
 def init_db() -> None:
     """Создать таблицы (для dev)."""
     from src.database import Base, engine

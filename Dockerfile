@@ -3,7 +3,7 @@ FROM node:20-alpine AS webbuilder
 
 WORKDIR /web
 COPY web/package*.json ./
-RUN npm ci || npm install
+RUN npm ci
 
 COPY web/ ./
 RUN npm run build
@@ -20,8 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Код нужен ДО pip install: hatchling собирает wheel из src/
 COPY backend/pyproject.toml ./
+COPY backend/README.md ./README.md
 COPY backend/src ./src
 RUN pip install --no-cache-dir .
+
+# Не запускать API от root внутри контейнера.
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && chown -R app:app /app
+USER app
 
 # Остальное (миграции, тесты)
 COPY backend/alembic ./alembic

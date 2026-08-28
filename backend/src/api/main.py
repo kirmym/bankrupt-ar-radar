@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -11,14 +13,24 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.api.diagnostics import router as diagnostics_router
+from src.api.security import require_api_access
 from src.config import get_settings
 from src.database import get_db
-from src.models.entities import Claim, Lot, Trade, UserFeedback
+from src.models.entities import (
+    AlertState,
+    Claim,
+    ImportCheckpoint,
+    ImportRun,
+    Lot,
+    Party,
+    Trade,
+    UserFeedback,
+)
 from src.models.enums import LotClass, TradeStatus
 from src.runtime import start_background_tasks, stop_background_tasks
 from src.schemas.lot import (
@@ -55,7 +67,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -66,7 +78,63 @@ async def health() -> HealthResponse:
     return HealthResponse(version="0.1.0")
 
 
+@app.get("/ready", tags=["system"])
+async def readiness(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
+    """Readiness probe: the process and its database must both be usable."""
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.warning("readiness: database check failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+    return {"status": "ok", "database": "ok"}
+
+
 app.include_router(diagnostics_router, prefix="/api/v1", tags=["diagnostics"])
+
+
+@app.get(
+    "/api/v1/ingest/status",
+    tags=["diagnostics"],
+    dependencies=[Depends(require_api_access)],
+)
+async def ingest_status(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, object | None]:
+    """Return the latest ingest run and durable page checkpoint."""
+    run = (
+        await db.execute(
+            select(ImportRun)
+            .where(ImportRun.source == "efrsb_public")
+            .order_by(ImportRun.started_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    checkpoint = await db.scalar(
+        select(ImportCheckpoint).where(ImportCheckpoint.source == "efrsb_public")
+    )
+    return {
+        "source": "efrsb_public",
+        "run": (
+            {
+                "id": run.id,
+                "status": run.status,
+                "started_at": run.started_at,
+                "finished_at": run.finished_at,
+                "last_page": run.last_page,
+                "items_seen": run.items_seen,
+                "items_upserted": run.items_upserted,
+                "error_code": run.error_code,
+                "error_message": run.error_message,
+            }
+            if run
+            else None
+        ),
+        "checkpoint": (
+            {"cursor": checkpoint.cursor, "updated_at": checkpoint.updated_at}
+            if checkpoint
+            else None
+        ),
+    }
 
 
 # ── Лоты ─────────────────────────────────────────────────────────────────────
@@ -78,11 +146,12 @@ async def list_lots(
     page: int = Query(ge=1, default=1),
     page_size: int = Query(ge=1, le=100, default=20),
     score_class: LotClass | None = None,
-    min_ev: float | None = Query(default=None, ge=0),
-    max_ev: float | None = Query(default=None, ge=0),
-    debtor_inn: str | None = None,
+    min_ev: Annotated[Decimal | None, Query(ge=0)] = None,
+    max_ev: Annotated[Decimal | None, Query(ge=0)] = None,
+    debtor_inn: Annotated[str | None, Query(pattern=r"^\d{10}(\d{2})?$")] = None,
+    search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     trade_status: TradeStatus | None = None,
-    deadline_before: str | None = None,
+    deadline_before: datetime | None = None,
 ) -> LotListSchema:
     """Лента лотов с фильтрацией."""
     q = (
@@ -101,11 +170,21 @@ async def list_lots(
     if max_ev is not None:
         q = q.where(Lot.score_ev <= max_ev)
     if debtor_inn:
-        q = q.join(Claim, Claim.lot_id == Lot.id).join(
-            Claim.debtor_party, isouter=True
-        ).where(Claim.debtor_party.has(inn=debtor_inn))
+        q = q.where(Lot.claims.any(Claim.debtor_party.has(inn=debtor_inn)))
+    if search:
+        pattern = f"%{search.strip()}%"
+        q = q.where(
+            or_(
+                Lot.title.ilike(pattern),
+                Lot.description_text.ilike(pattern),
+                Lot.claims.any(Claim.debtor_party.has(Party.name.ilike(pattern))),
+                Lot.claims.any(Claim.debtor_party.has(Party.inn.ilike(pattern))),
+            )
+        )
     if trade_status:
         q = q.where(Trade.status == trade_status.value)
+    if deadline_before is not None:
+        q = q.where(Lot.current_interval_to <= deadline_before)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
@@ -176,6 +255,13 @@ async def get_stats(
     last_ingest = (
         await db.execute(select(func.max(Lot.updated_at)))
     ).scalar()
+    alerts_sent_today = (
+        await db.execute(
+            select(func.count(AlertState.id)).where(
+                AlertState.alerted_at >= datetime.now(UTC) - timedelta(days=1)
+            )
+        )
+    ).scalar() or 0
 
     return DashboardStats(
         total_lots=total,
@@ -185,7 +271,7 @@ async def get_stats(
         class_b=b_count,
         class_c=c_count,
         class_d=d_count,
-        alerts_sent_today=0,
+        alerts_sent_today=alerts_sent_today,
         last_ingest_at=last_ingest,
     )
 
@@ -193,11 +279,18 @@ async def get_stats(
 # ── Feedback ──────────────────────────────────────────────────────────────────
 
 
-@app.post("/api/v1/feedback", response_model=FeedbackSchema, tags=["feedback"])
+@app.post(
+    "/api/v1/feedback",
+    response_model=FeedbackSchema,
+    tags=["feedback"],
+    dependencies=[Depends(require_api_access)],
+)
 async def create_feedback(
     payload: FeedbackCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FeedbackSchema:
+    if await db.get(Lot, payload.lot_id) is None:
+        raise HTTPException(status_code=404, detail="Lot not found")
     fb = UserFeedback(
         lot_id=payload.lot_id,
         action=payload.action,
@@ -213,6 +306,18 @@ async def create_feedback(
 # ── SPA-статика (собранный фронтенд) ────────────────────────────────────────
 
 web_dist = Path(settings.web_dist_dir) if settings.web_dist_dir else Path(__file__).parent.parent.parent / "web" / "dist"
+web_dist = web_dist.resolve()
+
+
+def safe_static_file(root: Path, relative_path: str) -> Path | None:
+    """Return a file below ``root`` without following an escaping symlink."""
+    root = root.resolve()
+    candidate = (root / relative_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 if web_dist.is_dir():
     assets_dir = web_dist / "assets"
@@ -228,8 +333,8 @@ if web_dist.is_dir():
         # Не перехватываем API и health
         if full_path.startswith(("api/", "health", "docs", "openapi.json")):
             raise HTTPException(status_code=404, detail="Not found")
-        candidate = web_dist / full_path
-        if candidate.is_file():
+        candidate = safe_static_file(web_dist, full_path)
+        if candidate is not None:
             return FileResponse(candidate)
         return FileResponse(web_dist / "index.html")
 
