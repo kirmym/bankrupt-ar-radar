@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     efrsb_api_url: str = "https://bank-publications-demo.fedresurs.ru"
     efrsb_api_token: str = ""
     efrsb_public_url: str = "https://bankrot.fedresurs.ru"
+    # CDP endpoint already opened in CloakBrowser; optional challenge fallback.
+    cloakbrowser_cdp_url: str = ""
+    cloakbrowser_timeout_seconds: int = 90
+    cloakbrowser_wait_seconds: int = 8
     ingest_max_pages: int = 10
     ingest_page_size: int = 50
 

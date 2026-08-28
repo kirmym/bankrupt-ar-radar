@@ -43,6 +43,8 @@ def extract_text_from_pdf(data: bytes) -> str:
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     except ImportError:
         pass
+    except Exception as exc:
+        logger.warning("pypdf could not parse document: %s", type(exc).__name__)
     try:
         import pdfplumber  # type: ignore[import-not-found]
 
@@ -50,6 +52,8 @@ def extract_text_from_pdf(data: bytes) -> str:
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
     except ImportError:
         pass
+    except Exception as exc:
+        logger.warning("pdfplumber could not parse document: %s", type(exc).__name__)
     return ""
 
 

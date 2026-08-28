@@ -26,14 +26,13 @@ class SberbankAdapter(EtpAdapter):
             raise RuntimeError("Adapter not initialized")
 
         await self.rate_limit(0.5)
-        resp = await self._client.get(url)
-        if resp.status_code in (401, 403, 429):
-            raise EtpAccessError(f"ETP access status={resp.status_code}")
-        if resp.status_code == 404:
+        status_code, html = await self.fetch_html(url)
+        if status_code == 404:
             return None
-        resp.raise_for_status()
+        if status_code != 200:
+            raise EtpAccessError(f"ETP status={status_code}")
 
-        tree = HTMLParser(resp.text)
+        tree = HTMLParser(html)
 
         current_price = None
         price_el = tree.css_first(".price-block__current, .current-price, [class*='current']")
@@ -60,14 +59,13 @@ class SberbankAdapter(EtpAdapter):
             raise RuntimeError("Adapter not initialized")
 
         await self.rate_limit(0.5)
-        resp = await self._client.get(url)
-        if resp.status_code in (401, 403, 429):
-            raise EtpAccessError(f"ETP access status={resp.status_code}")
-        if resp.status_code == 404:
+        status_code, html = await self.fetch_html(url)
+        if status_code == 404:
             return []
-        resp.raise_for_status()
+        if status_code != 200:
+            raise EtpAccessError(f"ETP status={status_code}")
 
-        tree = HTMLParser(resp.text)
+        tree = HTMLParser(html)
         files: list[EtpFile] = []
 
         for a in tree.css("a[href*='.pdf'], a[href*='/File/'], a[href*='/Document']"):

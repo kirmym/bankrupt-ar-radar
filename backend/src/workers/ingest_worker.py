@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 from selectolax.parser import HTMLParser
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from src.config import get_settings
 from src.connectors.efrsb import (
@@ -18,7 +18,15 @@ from src.connectors.efrsb import (
     parse_lot_card,
     parse_price,
 )
-from src.models.entities import ImportCheckpoint, ImportRun, Lot, Party, RawSnapshot, Trade
+from src.models.entities import (
+    ImportCheckpoint,
+    ImportRun,
+    Lot,
+    Party,
+    PriceInterval,
+    RawSnapshot,
+    Trade,
+)
 from src.models.enums import (
     DZ_CLASSIFIER_CODES,
     DZ_CLASSIFIER_KEYWORDS,
@@ -137,8 +145,10 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     lot.description_html = card.get("description_html")
     lot.start_price = card.get("start_price")
     lot.current_price = card.get("current_price") or card.get("start_price")
+    lot.current_interval_from = card.get("current_interval_from")
     lot.current_interval_to = card.get("current_interval_to")
     lot.cutoff_price = card.get("cutoff_price")
+    lot.price_reduction_html = card.get("price_reduction_html")
     lot.nominal_claimed = card.get("nominal_claimed")
     lot.deposit_amount = card.get("deposit_amount")
     lot.deposit_percent = card.get("deposit_percent")
@@ -147,6 +157,28 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     lot.classifier_codes = card.get("classifier_codes", [])
     lot.classifier_labels = card.get("classifier_labels", [])
     lot.is_receivable = card.get("is_receivable", False)
+
+    # Перезаписываем расписание атомарно: источник может изменить шаги публички.
+    interval_rows = card.get("price_intervals") or []
+    if interval_rows:
+        await db.execute(delete(PriceInterval).where(PriceInterval.lot_id == lot.id))
+        active_interval = None
+        for row in interval_rows:
+            interval = PriceInterval(
+                lot_id=lot.id,
+                seq=int(row.get("seq") or 0),
+                price=row.get("price"),
+                starts_at=row.get("starts_at"),
+                ends_at=row.get("ends_at"),
+                is_current=bool(row.get("is_current", False)),
+            )
+            db.add(interval)
+            if interval.is_current:
+                active_interval = interval
+        if active_interval is not None:
+            lot.current_price = active_interval.price
+            lot.current_interval_from = active_interval.starts_at
+            lot.current_interval_to = active_interval.ends_at
 
     # Банкрот
     bankrupt_inn = card.get("bankrupt_inn")
@@ -195,7 +227,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
             db.add(claim)
             await db.flush()
-        claim.principal = card.get("nominal_claimed") or card.get("start_price")
+        claim.principal = card.get("nominal_claimed")
         claim.debtor_party_id = debtor.id
         if card.get("has_judgment"):
             claim.has_judgment = True
@@ -244,6 +276,10 @@ async def run_ingest() -> int:
                 description = item.get("description_text") or item.get("description")
                 props: dict[str, str] = {}
                 raw_content: str | None = None
+                detail: dict = {}
+                price_intervals: list[dict] = []
+                classifier_codes: list[str] = []
+                classifier_labels: list[str] = []
                 if item.get("url"):
                     try:
                         raw_content = await fetch_page(item["url"])
@@ -251,6 +287,8 @@ async def run_ingest() -> int:
                         title = detail.get("title") or title
                         description = detail.get("description") or description
                         props = detail.get("props") or {}
+                        price_intervals = detail.get("price_intervals") or []
+                        classifier_codes, classifier_labels = parse_classifier(raw_content)
                     except SourceAccessError:
                         raise
                     except Exception as exc:
@@ -268,17 +306,48 @@ async def run_ingest() -> int:
                     ),
                     None,
                 )
+                current_interval = next(
+                    (row for row in price_intervals if row.get("is_current")), None
+                )
+                prop_values = {key.lower(): value for key, value in props.items()}
+                cutoff_price = next(
+                    (
+                        parse_price(value)
+                        for key, value in prop_values.items()
+                        if "отсеч" in key or "минимальн" in key
+                    ),
+                    None,
+                )
+                deposit_amount = next(
+                    (
+                        parse_price(value)
+                        for key, value in prop_values.items()
+                        if "задат" in key or "обеспеч" in key
+                    ),
+                    None,
+                )
                 card = {
                     "efrsb_url": item.get("url"),
-                    "lot_no": item.get("lot_no", 1),
+                    "lot_no": detail.get("lot_no") or item.get("lot_no") or 1,
                     "title": title,
                     "description_text": description,
+                    "description_html": detail.get("description_html"),
+                    "price_reduction_html": detail.get("price_reduction_html"),
+                    "price_intervals": price_intervals,
+                    "current_price": current_interval.get("price") if current_interval else None,
+                    "current_interval_from": current_interval.get("starts_at") if current_interval else None,
+                    "current_interval_to": current_interval.get("ends_at") if current_interval else None,
+                    "cutoff_price": cutoff_price,
+                    "deposit_amount": deposit_amount,
+                    "classifier_codes": classifier_codes,
+                    "classifier_labels": classifier_labels,
                     "start_price": start_price,
-                    "current_price": start_price,
                     "nominal_claimed": nominal,
                     "raw_content": raw_content,
                     "debtor_inn": extract_debtor_inn(description, title),
-                    "is_receivable": await is_receivable_lot([], [], description, title),
+                    "is_receivable": await is_receivable_lot(
+                        classifier_codes, classifier_labels, description, title
+                    ),
                     "bundle_flag": any(
                         marker in f"{title} {description or ''}".lower()
                         for marker in ("единый лот", "корзина требований", "в составе лота")

@@ -1,10 +1,12 @@
 """Тесты ЭТП-парсера файлов."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
-from src.connectors.etp_base import EtpFile
+from src.connectors.etp_base import EtpAccessError, EtpFile
 from src.connectors.etp_cdt import CdtAdapter
 from src.connectors.files import (
     extract_dates,
@@ -173,3 +175,90 @@ async def test_downloader_rejects_declared_oversize(monkeypatch: pytest.MonkeyPa
 
 async def _noop() -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_etp_html_uses_cloakbrowser_after_challenge(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+            cloakbrowser_wait_seconds=0,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request)
+
+    async def browser_fetch(url: str, **kwargs) -> str:
+        assert url.startswith("https://elektortorgi.ru/")
+        assert kwargs["allowed_hosts"] == {"elektortorgi.ru"}
+        return "<html><body>ok</body></html>"
+
+    monkeypatch.setattr(
+        "src.connectors.cloakbrowser.fetch_html_via_cloakbrowser",
+        browser_fetch,
+    )
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        status, html = await adapter.fetch_html("https://elektortorgi.ru/trade/1/lot/1")
+    finally:
+        await adapter._client.aclose()
+    assert status == 200
+    assert "ok" in html
+
+
+@pytest.mark.asyncio
+async def test_etp_html_stays_paused_without_cloakbrowser(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(cloakbrowser_cdp_url=""),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, request=request)
+
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(EtpAccessError, match="status=429"):
+            await adapter.fetch_html("https://elektortorgi.ru/trade/1/lot/1")
+    finally:
+        await adapter._client.aclose()
+
+
+
+@pytest.mark.asyncio
+async def test_downloader_uses_cloakbrowser_after_challenge(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request)
+
+    async def browser_download(url: str, **kwargs) -> bytes:
+        assert url.endswith("document.pdf")
+        assert kwargs["max_bytes"] == 25 * 1024 * 1024
+        return b"%PDF-1.4 content"
+
+    monkeypatch.setattr(
+        "src.connectors.cloakbrowser.fetch_bytes_via_cloakbrowser",
+        browser_download,
+    )
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(adapter, "_validate_download_url", lambda _url: _noop())
+    try:
+        data = await adapter.download_file(
+            EtpFile(title="document", url="https://elektortorgi.ru/document.pdf", kind="прочее")
+        )
+    finally:
+        await adapter._client.aclose()
+    assert data.startswith(b"%PDF")

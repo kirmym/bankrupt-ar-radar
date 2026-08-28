@@ -13,6 +13,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from src.config import get_settings
+
 if TYPE_CHECKING:
     pass
 
@@ -87,6 +89,31 @@ class EtpAdapter(ABC):
         """Список файлов лота (положения, договоры, акты)."""
         raise NotImplementedError
 
+    async def fetch_html(self, url: str) -> tuple[int, str]:
+        """Fetch an ETP page, falling back to a configured CloakBrowser profile."""
+        if not self._client:
+            raise RuntimeError("Adapter not initialized")
+        resp = await self._client.get(url, follow_redirects=False)
+        if resp.status_code not in (401, 403, 429):
+            return resp.status_code, resp.text
+
+        cdp_url = getattr(get_settings(), "cloakbrowser_cdp_url", "")
+        if not cdp_url:
+            raise EtpAccessError(f"ETP access status={resp.status_code}")
+        from src.connectors.cloakbrowser import CloakBrowserError, fetch_html_via_cloakbrowser
+
+        try:
+            html = await fetch_html_via_cloakbrowser(
+                url,
+                cdp_url=cdp_url,
+                timeout_seconds=int(getattr(get_settings(), "cloakbrowser_timeout_seconds", 90)),
+                wait_seconds=int(getattr(get_settings(), "cloakbrowser_wait_seconds", 8)),
+                allowed_hosts=self.allowed_hosts,
+            )
+        except CloakBrowserError as exc:
+            raise EtpAccessError(f"CloakBrowser fallback failed: {exc}") from exc
+        return 200, html
+
     async def download_file(self, file: EtpFile) -> bytes:
         """Download a bounded file from an allowed public host."""
         if not self._client:
@@ -102,6 +129,28 @@ class EtpAdapter(ABC):
                     raise RuntimeError("download redirect limit exceeded")
                 url = urljoin(url, location)
                 continue
+            if resp.status_code in (401, 403, 429):
+                cdp_url = getattr(get_settings(), "cloakbrowser_cdp_url", "")
+                if not cdp_url:
+                    raise EtpAccessError(f"ETP access status={resp.status_code}")
+                from src.connectors.cloakbrowser import (
+                    CloakBrowserError,
+                    fetch_bytes_via_cloakbrowser,
+                )
+
+                try:
+                    browser_data = await fetch_bytes_via_cloakbrowser(
+                        url,
+                        cdp_url=cdp_url,
+                        timeout_seconds=int(
+                            getattr(get_settings(), "cloakbrowser_timeout_seconds", 90)
+                        ),
+                        allowed_hosts=self.allowed_hosts,
+                        max_bytes=self.max_file_bytes,
+                    )
+                except CloakBrowserError as exc:
+                    raise EtpAccessError(f"CloakBrowser fallback failed: {exc}") from exc
+                return browser_data
             resp.raise_for_status()
             length = resp.headers.get("content-length")
             if length:
@@ -111,12 +160,12 @@ class EtpAdapter(ABC):
                     raise ValueError("invalid document size") from exc
                 if declared_size > self.max_file_bytes:
                     raise ValueError("download exceeds configured size limit")
-            data = bytearray()
+            streaming_data = bytearray()
             async for chunk in resp.aiter_bytes():
-                data.extend(chunk)
-                if len(data) > self.max_file_bytes:
+                streaming_data.extend(chunk)
+                if len(streaming_data) > self.max_file_bytes:
                     raise ValueError("download exceeds configured size limit")
-            return bytes(data)
+            return bytes(streaming_data)
         raise RuntimeError("download redirect limit exceeded")
 
     async def _validate_download_url(self, url: str) -> None:

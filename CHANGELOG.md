@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 (2026-08-28) — ingest reliability
+
+- Parsed public-offer price intervals and persisted the current step for scoring and alerts.
+- Made debtor INN extraction deterministic and role-aware.
+- Added optional CloakBrowser CDP fallback for source pages, ETP file listings, and challenged documents.
+- Invalid PDF payloads now fall back cleanly instead of breaking the files worker.
+
 ## 0.2.0 (2026-08-27) — Railway single-process deploy
 
 ### Деплой
