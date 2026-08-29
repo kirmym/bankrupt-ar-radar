@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from src.database import async_session_factory
-from src.models.entities import Lot, Trade
+from src.models.entities import Document, Lot, Trade
 from src.models.enums import TradeStatus
 from src.workers.files_worker import adapter_for_document_url
 
@@ -22,8 +22,8 @@ def normalize_trade_status(value: str | None) -> str | None:
     mapping = (
         (("отмен", "cancel"), TradeStatus.CANCELLED.value),
         (("приостанов", "suspend"), TradeStatus.SUSPENDED.value),
-        (("заверш", "completed", "состоял"), TradeStatus.COMPLETED.value),
         (("не состоя", "did not take", "failed"), TradeStatus.DID_NOT_TAKE_PLACE.value),
+        (("заверш", "completed", "состоял"), TradeStatus.COMPLETED.value),
         (("идут", "in progress", "активн"), TradeStatus.IN_PROGRESS.value),
         (("прием заяв", "application", "announced"), TradeStatus.APPLICATIONS_OPEN.value),
     )
@@ -71,8 +71,46 @@ async def run_etp_refresh(batch_size: int = 50) -> int:
                 normalized = normalize_trade_status(update.status)
                 if normalized:
                     trade.status = normalized
+
+                # Цена/статус — самостоятельный результат обновления. Коммитим
+                # их до необязательного списка вложений, чтобы ошибка файла не
+                # откатывала актуальные торги.
                 await session.commit()
                 refreshed += 1
+
+                files: list = []
+                try:
+                    async with adapter_cls() as adapter:
+                        files = (
+                            update.files
+                            if update.files is not None
+                            else await adapter.fetch_files(trade.trade_id_on_etp, lot.lot_no)
+                        )
+                except Exception:
+                    logger.exception("etp files refresh failed for lot %d", lot.id)
+
+                for file in files:
+                    document = (
+                        await session.execute(
+                            select(Document).where(
+                                Document.lot_id == lot.id,
+                                Document.url == file.url,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if document is None:
+                        session.add(
+                            Document(
+                                lot_id=lot.id,
+                                kind=file.kind,
+                                title=file.title[:300],
+                                url=file.url,
+                            )
+                        )
+                    else:
+                        document.kind = file.kind
+                        document.title = file.title[:300]
+                await session.commit()
             except Exception:
                 logger.exception("etp refresh failed for lot %d", lot.id)
                 await session.rollback()

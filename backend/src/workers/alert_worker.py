@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 
 from src.config import get_settings
 from src.database import async_session_factory
-from src.models.entities import AlertState, Lot, Trade
+from src.models.entities import AlertState, Lot, Trade, UserFeedback
 from src.models.enums import LotClass, TradeStatus
 from src.telegram import fmt_lot_message, send_message
 
@@ -20,14 +20,15 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def _was_alerted(session, lot_id: int, dedupe_hours: int) -> bool:
+async def _was_alerted(session, lot_id: int, chat_id: str, dedupe_hours: int) -> bool:
     since = datetime.now(UTC) - timedelta(hours=dedupe_hours)
     stmt = select(AlertState).where(
         AlertState.lot_id == lot_id,
+        or_(AlertState.chat_id == chat_id, AlertState.chat_id.is_(None)),
         AlertState.alerted_at >= since,
     )
     result = await session.execute(stmt)
-    return result.scalar_one_or_none() is not None
+    return result.first() is not None
 
 
 async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
@@ -60,6 +61,12 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
             )
             .where(
                 or_(
+                    Lot.current_interval_from.is_(None),
+                    Lot.current_interval_from <= datetime.now(UTC),
+                )
+            )
+            .where(
+                or_(
                     Lot.current_interval_to.is_(None),
                     Lot.current_interval_to > datetime.now(UTC),
                 )
@@ -73,7 +80,18 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
         for lot in lots:
             if sent >= limit:
                 break
-            if await _was_alerted(session, lot.id, dedupe_hours):
+            if lot.score_stop_factors:
+                continue
+
+            feedback = (
+                await session.execute(
+                    select(UserFeedback.action)
+                    .where(UserFeedback.lot_id == lot.id)
+                    .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if feedback in {"reject", "bought"}:
                 continue
 
             text = fmt_lot_message(
@@ -91,10 +109,21 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     "claims": [],
                 }
             )
-            if await send_message(text):
-                sent += 1
-                session.add(AlertState(lot_id=lot.id, alerted_at=datetime.now(UTC)))
-                await session.commit()
+            for chat_id in settings.telegram_chat_ids_list:
+                if sent >= limit:
+                    break
+                if await _was_alerted(session, lot.id, chat_id, dedupe_hours):
+                    continue
+                if await send_message(text, chat_id=chat_id):
+                    sent += 1
+                    session.add(
+                        AlertState(
+                            lot_id=lot.id,
+                            chat_id=chat_id,
+                            alerted_at=datetime.now(UTC),
+                        )
+                    )
+                    await session.commit()
 
     if sent:
         logger.info("alerts: %d sent", sent)

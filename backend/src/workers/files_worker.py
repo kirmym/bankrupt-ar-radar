@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
+from src.connectors.etp_base import EtpAdapter
 from src.connectors.files import (
     extract_facts_from_text,
     extract_text,
@@ -24,6 +25,25 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+class EfrsbDocumentAdapter(EtpAdapter):
+    """Download public EFRSB documents with the shared SSRF/browser guards."""
+
+    name = "efrsb"
+    base_url = "https://bankrot.fedresurs.ru"
+
+    def __init__(self, timeout: float = 30.0):
+        super().__init__(timeout)
+        configured_host = (urlparse(get_settings().efrsb_public_url).hostname or "").lower()
+        if configured_host:
+            self.allowed_hosts = {configured_host}
+
+    async def fetch_lot(self, etp_trade_id: str, lot_no: int):
+        raise NotImplementedError
+
+    async def fetch_files(self, etp_trade_id: str, lot_no: int):
+        raise NotImplementedError
+
+
 def adapter_for_document_url(url: str):
     """Return an adapter only for hosts explicitly supported by the project."""
     host = (urlparse(url).hostname or "").lower()
@@ -35,6 +55,9 @@ def adapter_for_document_url(url: str):
         from src.connectors.etp_sberbank import SberbankAdapter
 
         return SberbankAdapter
+    configured_efrsb_host = (urlparse(get_settings().efrsb_public_url).hostname or "").lower()
+    if configured_efrsb_host and host == configured_efrsb_host:
+        return EfrsbDocumentAdapter
     return None
 
 
@@ -65,14 +88,39 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
 
     # Хэш
     doc.sha256 = sha256_hex(data)
-    doc.downloaded_at = datetime.now(UTC)
 
     # Текст
-    text = extract_text(data)
+    lower_url = urlparse(doc.url).path.lower()
+    if lower_url.endswith(".doc"):
+        doc.text = None
+        doc.extracted_facts = {
+            "facts": {},
+            "source": "unsupported_legacy_doc",
+            "status": "needs_review",
+        }
+        doc.downloaded_at = None
+        return doc.extracted_facts
+    content_type = (
+        "application/pdf"
+        if lower_url.endswith(".pdf")
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if lower_url.endswith(".docx")
+        else ""
+    )
+    text = extract_text(data, content_type=content_type)
     doc.text = text
 
     # Факты
-    if settings.openai_api_key:
+    if not text.strip():
+        doc.extracted_facts = {
+            "facts": {},
+            "source": "parse_failed",
+            "status": "needs_review",
+        }
+        # Не помечаем повреждённый/неподдерживаемый файл как обработанный:
+        # очередь сможет повторить попытку после исправления адаптера.
+        doc.downloaded_at = None
+    elif settings.openai_api_key:
         try:
             from openai import AsyncOpenAI  # type: ignore[import-not-found]
 
@@ -84,6 +132,8 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
             doc.extracted_facts = {"facts": extract_facts_from_text(text), "source": "regex_fallback"}
     else:
         doc.extracted_facts = {"facts": extract_facts_from_text(text), "source": "regex"}
+    if text.strip():
+        doc.downloaded_at = datetime.now(UTC)
 
     claim = (
         await session.execute(
@@ -123,7 +173,7 @@ async def run_files(batch_size: int = 20) -> int:
         for doc in docs:
             try:
                 facts = await process_file(doc, doc.lot_id, session)
-                if facts:
+                if facts and facts.get("status") != "needs_review":
                     count += 1
                 await session.commit()
                 logger.info("files: doc %d processed", doc.id)

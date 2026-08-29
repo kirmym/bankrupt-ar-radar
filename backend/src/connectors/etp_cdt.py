@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -38,10 +38,14 @@ def _parse_dt(text: str | None) -> datetime | None:
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1), "%d.%m.%Y %H:%M")
+        return datetime.strptime(m.group(1), "%d.%m.%Y %H:%M").replace(
+            tzinfo=timezone(timedelta(hours=3))
+        ).astimezone(UTC)
     except ValueError:
         try:
-            return datetime.strptime(m.group(1), "%d-%m-%Y %H:%M")
+            return datetime.strptime(m.group(1), "%d-%m-%Y %H:%M").replace(
+                tzinfo=timezone(timedelta(hours=3))
+            ).astimezone(UTC)
         except ValueError:
             return None
 

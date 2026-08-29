@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from src.config import get_settings
 from src.connectors.enrich import enrich_party
@@ -27,6 +27,12 @@ async def run_enrich(batch_size: int = 50) -> int:
             select(Party)
             .where(Party.role == PartyRole.DEBTOR.value)
             .where(Party.inn.isnot(None))
+            .where(
+                or_(
+                    Party.source_as_of.is_(None),
+                    Party.source_as_of < datetime.now(UTC) - timedelta(days=1),
+                )
+            )
             .order_by(Party.source_as_of.asc().nulls_first())
             .limit(batch_size)
         )
@@ -36,13 +42,16 @@ async def run_enrich(batch_size: int = 50) -> int:
         for debtor in debtors:
             try:
                 statuses = await enrich_party(debtor, session)
-                enabled = settings.free_api_sources_list.intersection(statuses)
-                if enabled and all(statuses[name] for name in enabled):
+                # One timestamp is used by scoring as the identity/status
+                # verification timestamp. FSSP/KAD results must not make a
+                # stale EGRUL status look fresh.
+                if statuses.get("egrul", False):
                     debtor.source_as_of = datetime.now(UTC)
                     await session.commit()
                     logger.info("enrich: %s done (%s)", debtor.inn, statuses)
                 else:
                     logger.warning("enrich: %s is stale (%s)", debtor.inn, statuses)
+                await session.commit()
             except Exception:
                 logger.exception("enrich: failed for %s", debtor.inn)
                 await session.rollback()

@@ -24,8 +24,10 @@ CHALLENGE_MARKERS = (
 
 
 def _host_is_allowed(url: str, allowed_hosts: Iterable[str]) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return bool(host) and host in {item.lower() for item in allowed_hosts}
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    allowed = {item.lower() for item in allowed_hosts}
+    return parsed.scheme in {"http", "https"} and bool(host) and host in allowed
 
 
 async def fetch_html_via_cloakbrowser(
@@ -47,6 +49,7 @@ async def fetch_html_via_cloakbrowser(
     if allowed_hosts and not _host_is_allowed(url, allowed_hosts):
         raise CloakBrowserError("CloakBrowser URL host is not allowlisted")
 
+    page = None
     try:
         from playwright.async_api import async_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -54,23 +57,25 @@ async def fetch_html_via_cloakbrowser(
             "CloakBrowser fallback requires the optional playwright package"
         ) from exc
 
-    browser = None
     try:
         async with async_playwright() as playwright:
             try:
                 browser = await playwright.chromium.connect_over_cdp(cdp_url)
-                if browser.contexts:
-                    context = browser.contexts[0]
-                else:
-                    context = await browser.new_context()
-                page = context.pages[0] if context.pages else await context.new_page()
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                page = await context.new_page()
                 await page.goto(
                     url,
                     wait_until="domcontentloaded",
                     timeout=max(1, timeout_seconds) * 1000,
                 )
+                final_url = getattr(page, "url", url)
+                if allowed_hosts and not _host_is_allowed(final_url, allowed_hosts):
+                    raise CloakBrowserError("CloakBrowser navigation left the allowlist")
                 if wait_seconds > 0:
                     await page.wait_for_timeout(min(wait_seconds, timeout_seconds) * 1000)
+                final_url = getattr(page, "url", url)
+                if allowed_hosts and not _host_is_allowed(final_url, allowed_hosts):
+                    raise CloakBrowserError("CloakBrowser navigation left the allowlist")
                 body_text = ""
                 try:
                     body_text = await page.locator("body").inner_text(timeout=5000)
@@ -87,8 +92,8 @@ async def fetch_html_via_cloakbrowser(
                     f"CloakBrowser navigation failed: {type(exc).__name__}"
                 ) from exc
             finally:
-                if browser is not None:
-                    await browser.close()
+                if page is not None and hasattr(page, "close"):
+                    await page.close()
     except CloakBrowserError:
         raise
     except Exception as exc:
@@ -111,6 +116,7 @@ async def fetch_bytes_via_cloakbrowser(
     if allowed_hosts and not _host_is_allowed(url, allowed_hosts):
         raise CloakBrowserError("CloakBrowser URL host is not allowlisted")
 
+    context = None
     try:
         from playwright.async_api import async_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -118,7 +124,6 @@ async def fetch_bytes_via_cloakbrowser(
             "CloakBrowser fallback requires the optional playwright package"
         ) from exc
 
-    browser = None
     try:
         async with async_playwright() as playwright:
             try:
@@ -132,6 +137,20 @@ async def fetch_bytes_via_cloakbrowser(
                     raise CloakBrowserError(
                         f"browser document status={response.status}"
                     )
+                response_url = getattr(response, "url", url)
+                if allowed_hosts and not _host_is_allowed(response_url, allowed_hosts):
+                    raise CloakBrowserError("browser document redirect left the allowlist")
+                content_length = None
+                headers = getattr(response, "headers", {}) or {}
+                for header_name, header_value in headers.items():
+                    if header_name.lower() == "content-length":
+                        try:
+                            content_length = int(header_value)
+                        except ValueError as exc:
+                            raise CloakBrowserError("invalid browser document size") from exc
+                        break
+                if max_bytes is not None and content_length is not None and content_length > max_bytes:
+                    raise CloakBrowserError("browser document exceeds configured size limit")
                 data = await response.body()
                 if max_bytes is not None and len(data) > max_bytes:
                     raise CloakBrowserError("browser document exceeds configured size limit")
@@ -143,8 +162,8 @@ async def fetch_bytes_via_cloakbrowser(
                     f"CloakBrowser document download failed: {type(exc).__name__}"
                 ) from exc
             finally:
-                if browser is not None:
-                    await browser.close()
+                if context is not None and hasattr(context.request, "dispose"):
+                    await context.request.dispose()
     except CloakBrowserError:
         raise
     except Exception as exc:

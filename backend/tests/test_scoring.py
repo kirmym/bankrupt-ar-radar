@@ -1,7 +1,7 @@
 """Тесты для скоринга v1."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from src.models.enums import (
@@ -22,7 +22,7 @@ from src.scoring.v1 import (
 
 
 def make_debtor(
-    inn: str = "7701234567",
+    inn: str = "7707083893",
     status: OrgStatus = OrgStatus.ACTIVE,
     cash: Decimal | None = Decimal("1000000"),
     equity: Decimal | None = Decimal("1000000"),
@@ -39,30 +39,37 @@ def make_debtor(
         revenue=revenue,
         fssp_uncollectible=fssp_uncollectible,
         kad_bankruptcy_open=kad_bankruptcy_open,
+        source_as_of=datetime.now(UTC),
     )
 
 
 def make_claim(
     principal: Decimal = Decimal("1000000"),
+    claim_id: int = 1,
+    currency: str = "RUB",
     has_judgment: bool = False,
     has_writ: bool = False,
     enforcement_alive: bool = False,
     secured: bool = False,
     counterclaim_risk: bool = False,
+    assignment_forbidden: bool = False,
+    personal_claim: bool = False,
     limitations_deadline: date | None = None,
     il_present_deadline: date | None = None,
     kind: ClaimKind = ClaimKind.TRADE_AR,
 ) -> ClaimSchema:
     return ClaimSchema(
-        id=1,
+        id=claim_id,
         kind=kind,
         principal=principal,
-        currency="RUB",
+        currency=currency,
         has_judgment=has_judgment,
         has_writ=has_writ,
         enforcement_alive=enforcement_alive,
         secured=secured,
         counterclaim_risk=counterclaim_risk,
+        assignment_forbidden=assignment_forbidden,
+        personal_claim=personal_claim,
         limitations_deadline=limitations_deadline,
         il_present_deadline=il_present_deadline,
     )
@@ -382,3 +389,184 @@ def test_personal_claim_is_blocked():
     )
     assert result.score_class == LotClass.D
     assert StopFactor.PERSONAL_CLAIM in result.stop_factors
+
+
+def test_best_claim_flags_are_not_inherited_from_smaller_claim():
+    small_with_writ = make_claim(principal=Decimal("10000"), has_writ=True)
+    large_without_writ = make_claim(principal=Decimal("1000000"), has_writ=False)
+    first = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=make_debtor(),
+            claims=[small_with_writ, large_without_writ],
+        )
+    )
+    second = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=make_debtor(),
+            claims=[large_without_writ, small_with_writ],
+        )
+    )
+    assert first.scenario == second.scenario == Scenario.NEGOTIATION
+    assert first.ev == second.ev
+
+
+def test_unverified_debtor_blocks_signal_and_max_bid():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            claims=[make_claim(has_writ=True)],
+            debtor=DebtorPartySchema(inn="7707083893", status=OrgStatus.ACTIVE),
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert result.max_bid == Decimal(0)
+    assert StopFactor.DEBTOR_UNVERIFIED in result.stop_factors
+
+
+def test_bundle_with_aggregate_claim_is_blocked():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            is_bundle=True,
+            claims=[make_claim(has_writ=True)],
+            debtor=make_debtor(),
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert result.max_bid == Decimal(0)
+    assert StopFactor.BUNDLE_NO_DETAIL in result.stop_factors
+
+
+def test_expired_secondary_claim_blocks_total_score():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            claims=[
+                make_claim(principal=Decimal("1000000"), has_writ=True),
+                make_claim(
+                    principal=Decimal("900000"),
+                    limitations_deadline=date.today() - timedelta(days=1),
+                ),
+            ],
+            debtor=make_debtor(),
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert result.max_bid == Decimal(0)
+    assert StopFactor.LIMITATIONS_EXPIRED in result.stop_factors
+
+
+def test_non_rub_claim_is_blocked():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            claims=[make_claim(has_writ=True, currency="USD")],
+            debtor=make_debtor(),
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.UNSUPPORTED_CURRENCY in result.stop_factors
+
+
+def test_equal_principal_claim_selection_is_order_independent():
+    plain = make_claim(claim_id=10, has_judgment=False, has_writ=False)
+    evidenced = make_claim(claim_id=11, has_judgment=True, has_writ=True)
+    kwargs = {
+        "lot_id": 1,
+        "current_price": Decimal("10000"),
+        "debtor": make_debtor(cash=Decimal("10000000")),
+    }
+    first = compute_ev_and_class(ScoreInput(**kwargs, claims=[plain, evidenced]))
+    second = compute_ev_and_class(ScoreInput(**kwargs, claims=[evidenced, plain]))
+    assert first.scenario == second.scenario == Scenario.ENFORCEMENT
+    assert first.ev == second.ev
+
+
+def test_restrictions_on_secondary_claim_are_not_ignored():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=make_debtor(),
+            claims=[
+                make_claim(claim_id=1, principal=Decimal("2000000"), has_writ=True),
+                make_claim(
+                    claim_id=2,
+                    principal=Decimal("1000"),
+                    personal_claim=True,
+                    assignment_forbidden=True,
+                    counterclaim_risk=True,
+                ),
+            ],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.PERSONAL_CLAIM in result.stop_factors
+    assert StopFactor.ASSIGNMENT_FORBIDDEN in result.stop_factors
+    assert StopFactor.COUNTERCLAIM_RISK in result.stop_factors
+
+
+def test_stale_debtor_verification_blocks_signal():
+    debtor = make_debtor()
+    debtor.source_as_of = datetime.now(UTC) - timedelta(days=2)
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=debtor,
+            claims=[make_claim(has_writ=True)],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.DEBTOR_UNVERIFIED in result.stop_factors
+
+
+def test_multiple_debtors_block_total_score():
+    first = make_claim(claim_id=1).model_copy(
+        update={"debtor_party": make_debtor(inn="7707083893")}
+    )
+    second = make_claim(claim_id=2).model_copy(
+        update={"debtor_party": make_debtor(inn="500100732259")}
+    )
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=make_debtor(),
+            claims=[first, second],
+        )
+    )
+    assert result.score_class == LotClass.D
+    assert StopFactor.MULTIPLE_DEBTORS in result.stop_factors
+
+
+def test_mixed_claim_evidence_uses_weighted_success_rates():
+    debtor = make_debtor(cash=Decimal("10000000"), equity=Decimal("10000000"))
+    mixed = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=debtor,
+            claims=[
+                make_claim(principal=Decimal("1000000"), has_writ=True),
+                make_claim(principal=Decimal("900000")),
+            ],
+        )
+    )
+    writ_only = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=debtor,
+            claims=[make_claim(principal=Decimal("1900000"), has_writ=True)],
+        )
+    )
+    assert mixed.ev < writ_only.ev

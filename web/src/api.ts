@@ -50,6 +50,7 @@ export interface Claim {
   secured: boolean;
   assignment_forbidden: boolean;
   debtor_party?: DebtorParty;
+  guarantor_party?: DebtorParty;
 }
 
 export interface Lot {
@@ -88,6 +89,15 @@ export interface LotList {
   pages: number;
 }
 
+export interface Feedback {
+  id: number;
+  lot_id: number;
+  action: string;
+  recovered_amount?: string;
+  note?: string;
+  created_at: string;
+}
+
 export interface DashboardStats {
   total_lots: number;
   receivable_lots: number;
@@ -107,4 +117,13 @@ export const lotsApi = {
 
 export const statsApi = {
   get: () => api.get<DashboardStats>("/stats"),
+};
+
+export const feedbackApi = {
+  create: (payload: {
+    lot_id: number;
+    action: "watch" | "reject" | "bought";
+    recovered_amount?: number;
+    note?: string;
+  }) => api.post<Feedback>("/feedback", payload),
 };

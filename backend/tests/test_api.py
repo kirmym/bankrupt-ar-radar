@@ -54,6 +54,16 @@ def test_api_guard_requires_key_when_configured(monkeypatch: pytest.MonkeyPatch)
     require_api_access("secret")
 
 
+def test_api_guard_fails_closed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.api.security.get_settings",
+        lambda: SimpleNamespace(api_auth_token="", app_env="production"),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_access(None)
+    assert exc_info.value.status_code == 503
+
+
 def test_uuid_schema_accepts_orm_uuid() -> None:
     result = TradeBriefSchema.model_validate(
         {
@@ -79,7 +89,7 @@ def test_lot_card_schema_resolves_nested_models() -> None:
 
 def test_public_parser_and_money_formatter_keep_decimal_values() -> None:
     parsed = parse_lot_card(
-        "<h1>Лот 42</h1><div class='description'>ИНН 7701234567</div>",
+        "<h1>Лот 42</h1><div class='description'>ИНН 7707083893</div>",
         "https://bankrot.fedresurs.ru/lot/42",
     )
     assert parsed["title"] == "Лот 42"

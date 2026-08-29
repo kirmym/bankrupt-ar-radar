@@ -19,6 +19,7 @@ from src.connectors.efrsb import (
     parse_price,
 )
 from src.models.entities import (
+    Document,
     ImportCheckpoint,
     ImportRun,
     Lot,
@@ -84,6 +85,14 @@ def parse_classifier(html: str) -> tuple[list[str], list[str]]:
         if len(cells) >= 2:
             code = cells[0].text().strip()
             label = " ".join(c.text().strip() for c in cells[1:])
+            row_text = " ".join(cell.text().strip() for cell in cells)
+            if (
+                "%" in row_text
+                or "руб" in row_text.lower()
+                or any(char.isdigit() for char in row_text)
+                and any(separator in row_text for separator in (".", ":", "—", "-"))
+            ):
+                continue
             if code and code[0].isdigit():
                 codes.append(code)
                 labels.append(label)
@@ -113,6 +122,24 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         db.add(trade)
         await db.flush()
 
+    for field in (
+        "efrsb_trade_guid",
+        "efrsb_message_guid",
+        "trade_id_on_etp",
+        "etp_inn",
+        "etp_name",
+        "etp_url",
+        "organizer_inn",
+        "organizer_name",
+        "am_inn",
+        "am_name",
+        "applications_from",
+        "applications_to",
+    ):
+        value = card.get(field)
+        if value is not None:
+            setattr(trade, field, value)
+
     raw_content = card.get("raw_content")
     if isinstance(raw_content, str) and raw_content:
         snapshot = RawSnapshot(
@@ -140,23 +167,41 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         await db.flush()
 
     # Заполняем поля
-    lot.title = card.get("title", "")[:500]
-    lot.description_text = card.get("description_text")
-    lot.description_html = card.get("description_html")
-    lot.start_price = card.get("start_price")
-    lot.current_price = card.get("current_price") or card.get("start_price")
-    lot.current_interval_from = card.get("current_interval_from")
-    lot.current_interval_to = card.get("current_interval_to")
-    lot.cutoff_price = card.get("cutoff_price")
-    lot.price_reduction_html = card.get("price_reduction_html")
-    lot.nominal_claimed = card.get("nominal_claimed")
-    lot.deposit_amount = card.get("deposit_amount")
-    lot.deposit_percent = card.get("deposit_percent")
-    lot.bundle_flag = bool(card.get("bundle_flag", False))
-
-    lot.classifier_codes = card.get("classifier_codes", [])
-    lot.classifier_labels = card.get("classifier_labels", [])
-    lot.is_receivable = card.get("is_receivable", False)
+    text_fields = (
+        "title",
+        "description_text",
+        "description_html",
+        "price_reduction_html",
+    )
+    for field in text_fields:
+        value = card.get(field)
+        if value is not None:
+            setattr(lot, field, value[:500] if field == "title" else value)
+    for field in (
+        "start_price",
+        "cutoff_price",
+        "nominal_claimed",
+        "deposit_amount",
+        "deposit_percent",
+        "current_interval_from",
+        "current_interval_to",
+    ):
+        value = card.get(field)
+        if value is not None:
+            setattr(lot, field, value)
+    current_price = card.get("current_price")
+    if current_price is not None:
+        lot.current_price = current_price
+    elif lot.current_price is None and card.get("start_price") is not None:
+        lot.current_price = card["start_price"]
+    for field in ("classifier_codes", "classifier_labels"):
+        value = card.get(field)
+        if value:
+            setattr(lot, field, value)
+    if "is_receivable" in card and card["is_receivable"] is not None:
+        lot.is_receivable = bool(card["is_receivable"])
+    if "bundle_flag" in card and card["bundle_flag"] is not None:
+        lot.bundle_flag = bool(card["bundle_flag"])
 
     # Перезаписываем расписание атомарно: источник может изменить шаги публички.
     interval_rows = card.get("price_intervals") or []
@@ -180,6 +225,27 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             lot.current_interval_from = active_interval.starts_at
             lot.current_interval_to = active_interval.ends_at
 
+    for file_data in card.get("documents") or []:
+        if isinstance(file_data, str):
+            file_data = {"url": file_data}
+        file_url = file_data.get("url")
+        if not file_url:
+            continue
+        document = (
+            await db.execute(
+                select(Document).where(
+                    Document.lot_id == lot.id,
+                    Document.url == file_url,
+                )
+            )
+        ).scalar_one_or_none()
+        if document is None:
+            document = Document(lot_id=lot.id, url=file_url)
+            db.add(document)
+        for field in ("kind", "title"):
+            if file_data.get(field) is not None:
+                setattr(document, field, str(file_data[field])[:300 if field == "title" else 50])
+
     # Банкрот
     bankrupt_inn = card.get("bankrupt_inn")
     if bankrupt_inn:
@@ -198,7 +264,8 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             db.add(bankrupt)
             await db.flush()
         trade.bankrupt_party_id = bankrupt.id
-        trade.case_number = card.get("case_number")
+        if card.get("case_number") is not None:
+            trade.case_number = card["case_number"]
 
     # Дебитор (claim)
     debtor_inn = card.get("debtor_inn")
@@ -227,7 +294,8 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
             db.add(claim)
             await db.flush()
-        claim.principal = card.get("nominal_claimed")
+        if card.get("nominal_claimed") is not None:
+            claim.principal = card["nominal_claimed"]
         claim.debtor_party_id = debtor.id
         if card.get("has_judgment"):
             claim.has_judgment = True
@@ -256,7 +324,7 @@ async def run_ingest() -> int:
             select(ImportCheckpoint).where(ImportCheckpoint.source == "efrsb_public")
         )
         start_page = 1
-        if previous_run and previous_run.status in {"paused", "failed"} and checkpoint:
+        if previous_run and previous_run.status in {"running", "paused", "failed"} and checkpoint:
             try:
                 start_page = max(1, int(checkpoint.cursor or "1"))
             except ValueError:
@@ -277,6 +345,7 @@ async def run_ingest() -> int:
                 props: dict[str, str] = {}
                 raw_content: str | None = None
                 detail: dict = {}
+                detail_loaded = False
                 price_intervals: list[dict] = []
                 classifier_codes: list[str] = []
                 classifier_labels: list[str] = []
@@ -284,6 +353,7 @@ async def run_ingest() -> int:
                     try:
                         raw_content = await fetch_page(item["url"])
                         detail = parse_lot_card(raw_content, item["url"])
+                        detail_loaded = True
                         title = detail.get("title") or title
                         description = detail.get("description") or description
                         props = detail.get("props") or {}
@@ -318,7 +388,7 @@ async def run_ingest() -> int:
                     ),
                     None,
                 )
-                deposit_amount = next(
+                deposit_value = next(
                     (
                         parse_price(value)
                         for key, value in prop_values.items()
@@ -326,33 +396,60 @@ async def run_ingest() -> int:
                     ),
                     None,
                 )
+                deposit_text = next(
+                    (
+                        value
+                        for key, value in prop_values.items()
+                        if "задат" in key or "обеспеч" in key
+                    ),
+                    "",
+                )
                 card = {
                     "efrsb_url": item.get("url"),
                     "lot_no": detail.get("lot_no") or item.get("lot_no") or 1,
                     "title": title,
                     "description_text": description,
-                    "description_html": detail.get("description_html"),
-                    "price_reduction_html": detail.get("price_reduction_html"),
-                    "price_intervals": price_intervals,
-                    "current_price": current_interval.get("price") if current_interval else None,
-                    "current_interval_from": current_interval.get("starts_at") if current_interval else None,
-                    "current_interval_to": current_interval.get("ends_at") if current_interval else None,
-                    "cutoff_price": cutoff_price,
-                    "deposit_amount": deposit_amount,
-                    "classifier_codes": classifier_codes,
-                    "classifier_labels": classifier_labels,
                     "start_price": start_price,
                     "nominal_claimed": nominal,
                     "raw_content": raw_content,
                     "debtor_inn": extract_debtor_inn(description, title),
-                    "is_receivable": await is_receivable_lot(
-                        classifier_codes, classifier_labels, description, title
-                    ),
-                    "bundle_flag": any(
-                        marker in f"{title} {description or ''}".lower()
-                        for marker in ("единый лот", "корзина требований", "в составе лота")
-                    ),
                 }
+                if detail_loaded:
+                    card.update(
+                        {
+                            "description_html": detail.get("description_html"),
+                            "price_reduction_html": detail.get("price_reduction_html"),
+                            "price_intervals": price_intervals,
+                            "current_price": current_interval.get("price") if current_interval else None,
+                            "current_interval_from": current_interval.get("starts_at") if current_interval else None,
+                            "current_interval_to": current_interval.get("ends_at") if current_interval else None,
+                            "cutoff_price": cutoff_price,
+                            "deposit_amount": None if "%" in deposit_text else deposit_value,
+                            "deposit_percent": deposit_value if "%" in deposit_text else None,
+                            "classifier_codes": classifier_codes,
+                            "classifier_labels": classifier_labels,
+                            "documents": detail.get("documents") or item.get("documents") or [],
+                            "etp_url": detail.get("etp_url") or item.get("etp_url"),
+                            "trade_id_on_etp": detail.get("trade_id_on_etp") or item.get("trade_id_on_etp"),
+                            "etp_name": detail.get("etp_name") or item.get("etp_name"),
+                            "etp_inn": detail.get("etp_inn") or item.get("etp_inn"),
+                            "is_receivable": await is_receivable_lot(
+                                classifier_codes, classifier_labels, description, title
+                            ),
+                            "bundle_flag": any(
+                                marker in f"{title} {description or ''}".lower()
+                                for marker in ("единый лот", "корзина требований", "в составе лота")
+                            ),
+                        }
+                    )
+                else:
+                    # При недоступной карточке сохраняем только поля списка.
+                    # Нельзя затирать уже подтвержденные признаки значениями False.
+                    card["documents"] = item.get("documents") or []
+                    card["etp_url"] = item.get("etp_url")
+                    card["trade_id_on_etp"] = item.get("trade_id_on_etp")
+                    card["etp_name"] = item.get("etp_name")
+                    card["etp_inn"] = item.get("etp_inn")
                 saved = await persist_trade_and_lot(card, db)
                 if saved:
                     processed += 1
@@ -376,6 +473,7 @@ async def run_ingest() -> int:
             logger.info("ingest: processed %d public offers", processed)
             await db.commit()
         except SourceParseError as exc:
+            await db.rollback()
             run.status = "failed"
             run.error_code = "parse_error"
             run.error_message = str(exc)[:500]
@@ -383,6 +481,7 @@ async def run_ingest() -> int:
             await db.commit()
             logger.error("ingest: parser contract failed: %s", exc)
         except SourceAccessError as exc:
+            await db.rollback()
             run.status = "paused"
             run.error_code = "source_access"
             run.error_message = str(exc)[:500]
@@ -390,6 +489,7 @@ async def run_ingest() -> int:
             await db.commit()
             logger.warning("ingest: source access paused: %s", exc)
         except Exception as exc:
+            await db.rollback()
             run.status = "failed"
             run.error_code = type(exc).__name__[:50]
             run.error_message = str(exc)[:500]

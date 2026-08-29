@@ -10,6 +10,7 @@ import pytest
 
 from src.connectors.efrsb import (
     SourceAccessError,
+    SourceParseError,
     extract_debtor_inn,
     extract_inn,
     extract_ogrn,
@@ -20,15 +21,15 @@ from src.connectors.efrsb import (
 
 
 def test_extract_inn_10_digits():
-    text = "ООО Ромашка ИНН 7701234567 зарегистрировано"
+    text = "ООО Ромашка ИНН 7707083893 зарегистрировано"
     result = extract_inn(text)
-    assert "7701234567" in result
+    assert "7707083893" in result
 
 
 def test_extract_inn_12_digits():
-    text = "ИП Иванов ИНН 123456789012"
+    text = "ИП Иванов ИНН 500100732259"
     result = extract_inn(text)
-    assert "123456789012" in result
+    assert "500100732259" in result
 
 
 def test_extract_inn_no_inn():
@@ -41,8 +42,13 @@ def test_extract_inn_filters_invalid():
     assert "0123456789" not in result
 
 
+def test_extract_inn_validates_checksum_without_region_shortcut():
+    assert extract_inn("ИНН 1600000011") == ["1600000011"]
+    assert extract_inn("ИНН 7707083894") == []
+
+
 def test_extract_inn_unique():
-    text = "ИНН 7701234567 ИНН 7701234567"
+    text = "ИНН 7707083893 ИНН 7707083893"
     result = extract_inn(text)
     assert len(result) == 1
 
@@ -54,16 +60,16 @@ def test_extract_ogrn_13():
 
 
 def test_extract_debtor_inn_with_label():
-    text = "Право требования к ООО «Ромашка» ИНН 7701234567"
+    text = "Право требования к ООО «Ромашка» ИНН 7707083893"
     inn = extract_debtor_inn(text, None)
-    assert inn == "7701234567"
+    assert inn == "7707083893"
 
 
 def test_extract_debtor_inn_with_title():
     text = "Дебиторская задолженность ООО Ромашка ОГРН 1027700132195"
-    title = "Лот №1: 7701234567"
+    title = "Лот №1: 7707083893"
     inn = extract_debtor_inn(text, title)
-    assert inn == "7701234567"
+    assert inn == "7707083893"
 
 
 def test_extract_debtor_inn_empty():
@@ -121,11 +127,11 @@ async def test_public_offer_challenge_is_not_an_empty_success() -> None:
 
 def test_extract_debtor_inn_prefers_role_context_and_exclusions():
     description = (
-        "Банкрот ООО Продавец ИНН 7700000000. "
-        "Право требования к ООО Покупатель ИНН 7701234567."
+        "Банкрот ООО Продавец ИНН 7700000009. "
+        "Право требования к ООО Покупатель ИНН 7707083893."
     )
-    assert extract_debtor_inn(description, None) == "7701234567"
-    assert extract_debtor_inn("ИНН 7700000000 ИНН 7701234567", None, {"7700000000"}) == "7701234567"
+    assert extract_debtor_inn(description, None) == "7707083893"
+    assert extract_debtor_inn("ИНН 7700000009 ИНН 7707083893", None, {"7700000009"}) == "7707083893"
 
 
 def test_parse_price_intervals_marks_current_step():
@@ -148,10 +154,46 @@ def test_parse_price_intervals_marks_current_step():
     assert intervals[0]["ends_at"] == datetime(2026, 1, 3, tzinfo=UTC)
 
 
+def test_parse_price_intervals_has_no_current_step_outside_schedule():
+    html = """
+    <table>
+      <tr><td>01.09.2026 00:00 — 03.09.2026 00:00</td><td>10 000 руб.</td></tr>
+    </table>
+    """
+    intervals = parse_price_intervals(html, now=datetime(2026, 8, 28, tzinfo=UTC))
+    assert intervals[0]["is_current"] is False
+
+
+def test_parse_price_intervals_does_not_use_sequence_as_price():
+    html = """
+    <table>
+      <tr><td>1</td><td>01.09.2026 — 03.09.2026</td><td>цена не указана</td></tr>
+    </table>
+    """
+    assert parse_price_intervals(html, now=datetime(2026, 9, 1, tzinfo=UTC)) == []
+
+
+def test_parse_moscow_time_is_converted_to_utc():
+    from src.connectors.efrsb import _parse_datetime
+
+    assert _parse_datetime("01.09.2026 12:00 МСК") == datetime(
+        2026, 9, 1, 9, tzinfo=UTC
+    )
+
+
+def test_moscow_timezone_is_preserved_for_interval_cells():
+    from src.connectors.efrsb import _parse_datetimes
+
+    assert _parse_datetimes("01.09.2026 12:00 МСК — 02.09.2026 12:00 МСК") == [
+        datetime(2026, 9, 1, 9, tzinfo=UTC),
+        datetime(2026, 9, 2, 9, tzinfo=UTC),
+    ]
+
+
 def test_parse_lot_card_exposes_price_reduction_and_lot_number():
     html = """
     <h1>Лот №42 — право требования</h1>
-    <div class="description">ИНН 7701234567</div>
+    <div class="description">ИНН 7707083893</div>
     <div class="price-reduction"><table>
       <tr><td>01.01.2026 — 03.01.2026</td><td>10 000 руб.</td></tr>
     </table></div>
@@ -160,6 +202,37 @@ def test_parse_lot_card_exposes_price_reduction_and_lot_number():
     assert result["lot_no"] == 42
     assert result["price_reduction_html"]
     assert result["price_intervals"][0]["price"] == Decimal("10000")
+
+
+def test_parse_lot_card_connects_etp_and_documents():
+    result = parse_lot_card(
+        """
+        <h1>Лот №42 — право требования</h1>
+        <a href="https://elektortorgi.ru/trade/abc-42/lot/1">ЭТП</a>
+        <a href="https://elektortorgi.ru/files/contract.pdf">Договор</a>
+        """,
+        "https://bankrot.fedresurs.ru/lot/42",
+    )
+    assert result["etp_url"] == "https://elektortorgi.ru/trade/abc-42/lot/1"
+    assert result["trade_id_on_etp"] == "abc-42"
+    assert result["documents"][0]["url"].endswith("contract.pdf")
+
+
+def test_parse_lot_card_rejects_unrecognized_empty_markup():
+    with pytest.raises(SourceParseError, match="markers were not found"):
+        parse_lot_card("<html><div class='new-layout'>changed</div></html>", "https://bankrot.fedresurs.ru/lot/42")
+
+
+def test_parse_lot_card_uses_sberbank_query_trade_id_and_ignores_document_as_etp():
+    result = parse_lot_card(
+        """
+        <a href="https://utp.sberbank-ast.ru/files/contract.pdf">Договор</a>
+        <a href="https://utp.sberbank-ast.ru/bankrupttrade/TradeCard.aspx?tid=42&amp;lid=1">ЭТП</a>
+        """,
+        "https://bankrot.fedresurs.ru/lot/42",
+    )
+    assert result["etp_url"].endswith("tid=42&lid=1")
+    assert result["trade_id_on_etp"] == "42"
 
 
 @pytest.mark.asyncio
@@ -180,7 +253,7 @@ async def test_public_offer_uses_cloakbrowser_after_http_challenge(
         return httpx.Response(403, request=request)
 
     async def browser_fetch(url: str, timeout: float) -> str:
-        assert url.endswith("/publications/public/offer")
+        assert "page=1" in url and "type=public_offer" in url
         assert timeout == 30
         return '<div class="offer-item"><a href="/lot/99">Долг</a><span class="price">1 000 руб.</span></div>'
 
@@ -189,3 +262,43 @@ async def test_public_offer_uses_cloakbrowser_after_http_challenge(
         result = await search_public_offers(client=client)
 
     assert result[0]["url"] == "https://bankrot.fedresurs.ru/lot/99"
+
+
+def test_debtor_inn_skips_bankrupt_party_context():
+    description = (
+        "Должник (банкрот) ООО Продавец ИНН 7700000009. "
+        "Право требования к ООО Дебитор ИНН 7707083893."
+    )
+    assert extract_debtor_inn(description, None) == "7707083893"
+
+
+def test_debtor_inn_does_not_fallback_to_bankrupt_party():
+    description = "Должник (банкрот) ООО Продавец ИНН 7700000009"
+    assert extract_debtor_inn(description, None) is None
+
+
+@pytest.mark.asyncio
+async def test_public_offer_uses_cloakbrowser_for_http_200_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.connectors.efrsb.get_settings",
+        lambda: SimpleNamespace(
+            efrsb_public_url="https://bankrot.fedresurs.ru",
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+            cloakbrowser_wait_seconds=0,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>CAPTCHA</html>", request=request)
+
+    async def browser_fetch(url: str, timeout: float) -> str:
+        assert "type=public_offer" in url
+        return '<div class="offer-item"><a href="/lot/100">Долг</a></div>'
+
+    monkeypatch.setattr("src.connectors.efrsb._fetch_via_cloakbrowser", browser_fetch)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await search_public_offers(client=client)
+    assert result[0]["url"].endswith("/lot/100")

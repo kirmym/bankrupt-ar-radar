@@ -47,6 +47,7 @@ class DebtorPartySchema(BaseModel):
     kad_bankruptcy_open: bool | None = None
     fssp_sum: Decimal | None = None
     fssp_uncollectible: bool | None = None
+    source_as_of: datetime | None = None
 
 
 class ClaimSchema(BaseModel):
@@ -162,6 +163,8 @@ class DocumentSchema(BaseModel):
     title: str | None = None
     url: str | None = None
     downloaded_at: datetime | None = None
+    text: str | None = None
+    extracted_facts: dict | None = None
 
 
 # ── Скоринг ──────────────────────────────────────────────────────────────────

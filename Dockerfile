@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/pyproject.toml ./
 COPY backend/README.md ./README.md
 COPY backend/src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . "playwright>=1.49.0"
 
 # Не запускать API от root внутри контейнера.
 RUN addgroup --system app && adduser --system --ingroup app app \

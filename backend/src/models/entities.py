@@ -514,9 +514,13 @@ class AlertState(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"), index=True)
+    chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     alerted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    __table_args__ = (Index("ix_alerts_state_lot_time", "lot_id", "alerted_at"),)
+    __table_args__ = (
+        Index("ix_alerts_state_lot_time", "lot_id", "alerted_at"),
+        Index("ix_alerts_state_lot_chat_time", "lot_id", "chat_id", "alerted_at"),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

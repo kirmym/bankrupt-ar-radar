@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
@@ -98,6 +98,18 @@ def compute_success_rate(
     return max(Decimal("0.0"), min(Decimal("1.0"), rate))
 
 
+def _claim_rank(claim: ClaimSchema) -> tuple[Decimal, int, int, int, int, int]:
+    """Return a stable evidence rank for selecting a representative claim."""
+    return (
+        _d(claim.principal),
+        int(bool(claim.has_writ)),
+        int(bool(claim.has_judgment)),
+        int(bool(claim.enforcement_alive)),
+        int(bool(claim.secured)),
+        -claim.id,
+    )
+
+
 @dataclass
 class ScoreInput:
     """Входные данные для скоринга одного лота."""
@@ -177,6 +189,14 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             stop_factors.append(StopFactor.DEBTOR_EXCLUDED)
         elif debtor_status == "liquidation":
             stop_factors.append(StopFactor.DEBTOR_LIQUIDATION)
+        source_as_of = debtor.source_as_of
+        if (
+            debtor.status is None
+            or source_as_of is None
+            or source_as_of.tzinfo is None
+            or source_as_of < datetime.now(UTC) - timedelta(days=1)
+        ):
+            stop_factors.append(StopFactor.DEBTOR_UNVERIFIED)
 
         if debtor.fssp_uncollectible:
             gaps.append(Gap.FSSP_MISSING)  # данные устарели
@@ -187,7 +207,6 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     # ── 3. Требования ────────────────────────────────────────────────────────
     total_principal = Decimal(0)
     total_with_penalties = Decimal(0)
-    best_principal = Decimal("-1")
     best_claim_has_judgment = False
     best_claim_has_writ = False
     best_enforcement_alive = False
@@ -196,9 +215,6 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     best_claim_counterclaim_risk = False
     best_secured = False
     best_kind = "unknown"
-    best_claim_personal = False
-    best_claim_assignment_forbidden = False
-    best_claim_counterclaim = False
 
     for claim in inp.claims:
         principal = _d(claim.principal)
@@ -206,22 +222,16 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         total_principal += principal
         total_with_penalties += principal + penalties
 
-        if principal > best_principal:
-            best_principal = principal
-            if claim.has_judgment:
-                best_claim_has_judgment = True
-            if claim.has_writ:
-                best_claim_has_writ = True
-            if claim.enforcement_alive:
-                best_enforcement_alive = True
-            best_limitation_deadline = claim.limitations_deadline
-            best_il_present_deadline = claim.il_present_deadline
-            best_claim_counterclaim_risk = claim.counterclaim_risk
-            best_secured = claim.secured
-            best_kind = claim.kind.value
-            best_claim_personal = claim.personal_claim
-            best_claim_assignment_forbidden = claim.assignment_forbidden
-            best_claim_counterclaim = claim.counterclaim_risk
+    best_claim = max(inp.claims, key=_claim_rank, default=None)
+    if best_claim is not None:
+        best_claim_has_judgment = bool(best_claim.has_judgment)
+        best_claim_has_writ = bool(best_claim.has_writ)
+        best_enforcement_alive = bool(best_claim.enforcement_alive)
+        best_limitation_deadline = best_claim.limitations_deadline
+        best_il_present_deadline = best_claim.il_present_deadline
+        best_claim_counterclaim_risk = best_claim.counterclaim_risk
+        best_secured = best_claim.secured
+        best_kind = best_claim.kind.value
 
     # ── 4. Стоп-факторы ──────────────────────────────────────────────────────
     today = date.today()
@@ -230,18 +240,38 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         stop_factors.append(StopFactor.NO_DEBTOR_INN)
         gaps.append(Gap.DEBTOR_INN_MISSING)
 
-    if best_limitation_deadline and best_limitation_deadline < today:
-        stop_factors.append(StopFactor.LIMITATIONS_EXPIRED)
+    debtor_inns = {
+        claim.debtor_party.inn
+        for claim in inp.claims
+        if claim.debtor_party is not None and claim.debtor_party.inn
+    }
+    if len(debtor_inns) > 1:
+        stop_factors.append(StopFactor.MULTIPLE_DEBTORS)
 
-    if best_il_present_deadline and best_il_present_deadline < today:
+    if any(
+        claim.limitations_deadline is not None and claim.limitations_deadline < today
+        for claim in inp.claims
+    ):
+        stop_factors.append(StopFactor.LIMITATIONS_EXPIRED)
+    if any(
+        claim.il_present_deadline is not None and claim.il_present_deadline < today
+        for claim in inp.claims
+    ):
         stop_factors.append(StopFactor.IL_PRESENT_EXPIRED)
 
-    if best_claim_personal:
+    if any(claim.personal_claim for claim in inp.claims):
         stop_factors.append(StopFactor.PERSONAL_CLAIM)
-    if best_claim_assignment_forbidden:
+    if any(claim.assignment_forbidden for claim in inp.claims):
         stop_factors.append(StopFactor.ASSIGNMENT_FORBIDDEN)
-    if best_claim_counterclaim:
+    if any(claim.counterclaim_risk for claim in inp.claims):
         stop_factors.append(StopFactor.COUNTERCLAIM_RISK)
+    if any(claim.currency.upper() != "RUB" for claim in inp.claims):
+        stop_factors.append(StopFactor.UNSUPPORTED_CURRENCY)
+    if any(claim.kind.value == "registry_claim_on_bankrupt" for claim in inp.claims):
+        stop_factors.append(StopFactor.REGISTRY_CLAIM_ON_BANKRUPT)
+    if inp.is_bundle and len(inp.claims) <= 1:
+        gaps.append(Gap.BUNDLE_NO_DETAIL)
+        stop_factors.append(StopFactor.BUNDLE_NO_DETAIL)
 
     # ── 5. Определение сценария ──────────────────────────────────────────────
     if inp.scenario_override:
@@ -274,7 +304,8 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         best_il_present_deadline,
     )
     if med_months == 999:
-        stop_factors.append(StopFactor.LIMITATIONS_EXPIRED)
+        if StopFactor.LIMITATIONS_EXPIRED not in stop_factors:
+            stop_factors.append(StopFactor.LIMITATIONS_EXPIRED)
         return ScoreResult(
             lot_id=inp.lot_id,
             score_class=LotClass.D,
@@ -287,30 +318,50 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             gaps=gaps,
         )
 
-    success_rate = compute_success_rate(
-        best_claim_has_judgment,
-        best_claim_has_writ,
-        best_enforcement_alive,
-        best_kind,
-        best_secured,
-        best_claim_counterclaim_risk,
-        debtor.cash if debtor else None,
-        debtor.equity if debtor else None,
-        bool(debtor.fssp_uncollectible) if debtor else False,
-        bool(debtor.kad_bankruptcy_open) if debtor else False,
-    )
+    if total_principal > 0 and inp.claims:
+        # Claims may have different evidence. Weight their individual
+        # recovery probabilities by principal instead of applying the
+        # strongest claim's rate to the whole bundle.
+        weighted_success = Decimal(0)
+        for claim in inp.claims:
+            principal = _d(claim.principal)
+            if principal <= 0:
+                continue
+            weighted_success += principal * compute_success_rate(
+                bool(claim.has_judgment),
+                bool(claim.has_writ),
+                bool(claim.enforcement_alive),
+                claim.kind.value,
+                bool(claim.secured),
+                bool(claim.counterclaim_risk),
+                debtor.cash if debtor else None,
+                debtor.equity if debtor else None,
+                bool(debtor.fssp_uncollectible) if debtor else False,
+                bool(debtor.kad_bankruptcy_open) if debtor else False,
+            )
+        success_rate = weighted_success / total_principal
+    else:
+        success_rate = compute_success_rate(
+            best_claim_has_judgment,
+            best_claim_has_writ,
+            best_enforcement_alive,
+            best_kind,
+            best_secured,
+            best_claim_counterclaim_risk,
+            debtor.cash if debtor else None,
+            debtor.equity if debtor else None,
+            bool(debtor.fssp_uncollectible) if debtor else False,
+            bool(debtor.kad_bankruptcy_open) if debtor else False,
+        )
 
     # ── 8. Выбор базы ────────────────────────────────────────────────────────
     # Приоритет: номинал → сумма требований → start_price
     if total_principal > 0:
         base = total_principal
-    elif inp.is_bundle:
-        base = Decimal(0)
-        gaps.append(Gap.BUNDLE_NO_DETAIL)
-        stop_factors.append(StopFactor.BUNDLE_NO_DETAIL)
     elif inp.nominal_claimed and inp.nominal_claimed > 0:
         base = inp.nominal_claimed
         gaps.append(Gap.NOMINAL_ESTIMATED)
+        stop_factors.append(StopFactor.NOMINAL_UNVERIFIED)
     elif inp.nominal_claimed is None or inp.nominal_claimed <= 0:
         base = Decimal(0)
         gaps.append(Gap.NOMINAL_MISSING)
@@ -368,6 +419,8 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     if current_price > 0:
         max_bid = min(max_bid, current_price * Decimal("1.2"))
     max_bid = max(Decimal(0), max_bid)
+    if stop_factors:
+        max_bid = Decimal(0)
 
     return ScoreResult(
         lot_id=inp.lot_id,

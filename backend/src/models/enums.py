@@ -73,6 +73,8 @@ class Scenario(StrEnum):
 
 class StopFactor(StrEnum):
     NO_DEBTOR_INN = "no_debtor_inn"
+    DEBTOR_UNVERIFIED = "debtor_unverified"
+    MULTIPLE_DEBTORS = "multiple_debtors"
     DEBTOR_EXCLUDED = "debtor_excluded"
     DEBTOR_LIQUIDATION = "debtor_liquidation"
     LIMITATIONS_EXPIRED = "limitations_expired"
@@ -83,6 +85,9 @@ class StopFactor(StrEnum):
     NO_SOURCE_OF_FUNDS = "no_source_of_funds"
     DEBTOR_BANKRUPT_FINISHED = "debtor_bankrupt_finished"
     COUNTERCLAIM_RISK = "counterclaim_risk"
+    UNSUPPORTED_CURRENCY = "unsupported_currency"
+    REGISTRY_CLAIM_ON_BANKRUPT = "registry_claim_on_bankrupt"
+    NOMINAL_UNVERIFIED = "nominal_unverified"
 
 
 class Gap(StrEnum):

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Lot, lotsApi } from "../api";
+import { feedbackApi, Lot, lotsApi } from "../api";
 import { fmtDate, fmtMoney, fmtRelative } from "../utils";
 
 export default function LotDetail() {
@@ -15,6 +15,7 @@ export default function LotDetail() {
     lotsApi
       .get(parseInt(id, 10))
       .then((r) => setLot(r.data))
+      .catch(() => setLot(null))
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -107,9 +108,9 @@ export default function LotDetail() {
       <div className="bg-white p-4 rounded shadow-sm border border-slate-200">
         <h3 className="font-semibold text-slate-900">Действие</h3>
         <div className="mt-3 flex gap-2 flex-wrap">
-          <FeedbackButton lotId={lot.id} action="watch" label="👁 В работу" />
-          <FeedbackButton lotId={lot.id} action="reject" label="🚫 Отказ" />
-          <FeedbackButton lotId={lot.id} action="bought" label="✅ Куплено" />
+          <FeedbackButton lotId={lot.id} action="watch" label="👁 В работу" note={feedbackNote} />
+          <FeedbackButton lotId={lot.id} action="reject" label="🚫 Отказ" note={feedbackNote} />
+          <FeedbackButton lotId={lot.id} action="bought" label="✅ Куплено" note={feedbackNote} />
         </div>
         <textarea
           className="mt-3 w-full border border-slate-300 rounded p-2 text-sm"
@@ -252,14 +253,24 @@ function ClaimCard({ claim }: { claim: Lot["claims"][0] }) {
   );
 }
 
-function FeedbackButton({ lotId, action, label }: { lotId: number; action: string; label: string }) {
+function FeedbackButton({
+  lotId,
+  action,
+  label,
+  note,
+}: {
+  lotId: number;
+  action: "watch" | "reject" | "bought";
+  label: string;
+  note: string;
+}) {
   const onClick = async () => {
-    await fetch("/api/v1/feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lot_id: lotId, action }),
-    });
-    alert(`Сохранено: ${action}`);
+    try {
+      await feedbackApi.create({ lot_id: lotId, action, note: note.trim() || undefined });
+      alert(`Сохранено: ${action}`);
+    } catch {
+      alert("Не удалось сохранить действие. Проверьте доступ к API.");
+    }
   };
   return (
     <button

@@ -18,19 +18,20 @@ from src.connectors.files import (
     propose_fact_updates,
 )
 from src.connectors.llm import validate_llm_facts
+from src.models.entities import Document
 from src.models.enums import TradeStatus
 from src.workers.etp_worker import normalize_trade_status
-from src.workers.files_worker import adapter_for_document_url
+from src.workers.files_worker import EfrsbDocumentAdapter, adapter_for_document_url, process_file
 
 
 def test_extract_inn_basic():
-    text = "ООО Ромашка ИНН 7701234567"
+    text = "ООО Ромашка ИНН 7707083893"
     inns = extract_inn_from_text(text)
-    assert "7701234567" in inns
+    assert "7707083893" in inns
 
 
 def test_extract_inn_unique():
-    text = "ИНН 7701234567 ИНН 7701234567"
+    text = "ИНН 7707083893 ИНН 7707083893"
     inns = extract_inn_from_text(text)
     assert len(inns) == 1
 
@@ -113,12 +114,12 @@ def test_extract_text_passthrough_text():
 def test_llm_facts_are_validated_before_storage():
     valid = validate_llm_facts(
         {
-            "debtor": {"inn": "7701234567", "name": "ООО Ромашка"},
+            "debtor": {"inn": "7707083893", "name": "ООО Ромашка"},
             "claim": {"kind": "trade_ar", "principal": 1000},
         }
     )
     assert valid == {
-        "debtor": {"inn": "7701234567", "name": "ООО Ромашка"},
+        "debtor": {"inn": "7707083893", "name": "ООО Ромашка"},
         "claim": {"kind": "trade_ar", "principal": "1000"},
     }
     assert validate_llm_facts({"debtor": {"inn": "bad"}}) is None
@@ -128,13 +129,13 @@ def test_fact_proposal_preserves_conflicts_for_manual_review():
     from types import SimpleNamespace
 
     proposal = propose_fact_updates(
-        {"claim": {"principal": "200", "has_writ": True}, "debtor": {"inn": "7701234567"}},
+        {"claim": {"principal": "200", "has_writ": True}, "debtor": {"inn": "7707083893"}},
         claim=SimpleNamespace(principal="100", has_writ=False),
         debtor=SimpleNamespace(inn=None),
     )
     assert proposal["requires_review"] is True
     assert "claim.principal" in proposal["conflicts"]
-    assert proposal["updates"]["debtor"]["inn"] == "7701234567"
+    assert proposal["updates"]["debtor"]["inn"] == "7707083893"
 
 
 def test_document_adapter_is_selected_by_allowlisted_host():
@@ -143,8 +144,36 @@ def test_document_adapter_is_selected_by_allowlisted_host():
     assert adapter_for_document_url("https://example.invalid/file.pdf") is None
 
 
+def test_document_adapter_supports_efrsb_public_documents():
+    assert adapter_for_document_url("https://bankrot.fedresurs.ru/files/contract.pdf") is EfrsbDocumentAdapter
+
+
+@pytest.mark.asyncio
+async def test_legacy_doc_is_downloaded_but_left_for_manual_review(monkeypatch: pytest.MonkeyPatch):
+    class FakeAdapter:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def download_file(self, _file):
+            return b"legacy binary"
+
+    monkeypatch.setattr(
+        "src.workers.files_worker.adapter_for_document_url",
+        lambda _url: FakeAdapter,
+    )
+    doc = Document(lot_id=1, url="https://bankrot.fedresurs.ru/files/contract.doc", title="Договор")
+    result = await process_file(doc, 1, None)
+    assert result["status"] == "needs_review"
+    assert doc.downloaded_at is None
+    assert doc.text is None
+
+
 def test_etp_status_normalization_is_conservative():
     assert normalize_trade_status("Торги отменены") == TradeStatus.CANCELLED.value
+    assert normalize_trade_status("Торги не состоялись") == TradeStatus.DID_NOT_TAKE_PLACE.value
     assert normalize_trade_status("unknown vendor label") is None
 
 
@@ -229,6 +258,35 @@ async def test_etp_html_stays_paused_without_cloakbrowser(monkeypatch: pytest.Mo
         await adapter._client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_etp_html_uses_cloakbrowser_for_http_200_challenge(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+            cloakbrowser_wait_seconds=0,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>Verify you are human</html>", request=request)
+
+    async def browser_fetch(url: str, **kwargs) -> str:
+        assert kwargs["allowed_hosts"] == {"elektortorgi.ru"}
+        return "<html><body>real page</body></html>"
+
+    monkeypatch.setattr("src.connectors.cloakbrowser.fetch_html_via_cloakbrowser", browser_fetch)
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        status, html = await adapter.fetch_html("https://elektortorgi.ru/trade/1/lot/1")
+    finally:
+        await adapter._client.aclose()
+    assert status == 200
+    assert "real page" in html
+
+
 
 @pytest.mark.asyncio
 async def test_downloader_uses_cloakbrowser_after_challenge(monkeypatch: pytest.MonkeyPatch):
@@ -246,6 +304,46 @@ async def test_downloader_uses_cloakbrowser_after_challenge(monkeypatch: pytest.
     async def browser_download(url: str, **kwargs) -> bytes:
         assert url.endswith("document.pdf")
         assert kwargs["max_bytes"] == 25 * 1024 * 1024
+        return b"%PDF-1.4 content"
+
+    monkeypatch.setattr(
+        "src.connectors.cloakbrowser.fetch_bytes_via_cloakbrowser",
+        browser_download,
+    )
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(adapter, "_validate_download_url", lambda _url: _noop())
+    try:
+        data = await adapter.download_file(
+            EtpFile(title="document", url="https://elektortorgi.ru/document.pdf", kind="прочее")
+        )
+    finally:
+        await adapter._client.aclose()
+    assert data.startswith(b"%PDF")
+
+
+@pytest.mark.asyncio
+async def test_downloader_uses_cloakbrowser_for_http_200_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html>CAPTCHA</html>",
+            request=request,
+        )
+
+    async def browser_download(url: str, **kwargs) -> bytes:
+        assert url.endswith("document.pdf")
         return b"%PDF-1.4 content"
 
     monkeypatch.setattr(

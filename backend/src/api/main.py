@@ -159,7 +159,11 @@ async def list_lots(
         .join(Trade, Lot.trade_id == Trade.id)
         .where(Lot.is_receivable == True)  # noqa: E712
         .options(
-            selectinload(Lot.claims).selectinload(Claim.debtor_party),
+            selectinload(Lot.claims)
+            .selectinload(Claim.debtor_party),
+            selectinload(Lot.claims)
+            .selectinload(Claim.guarantor_party),
+            selectinload(Lot.price_intervals),
         )
     )
 
@@ -253,7 +257,12 @@ async def get_stats(
     d_count = await _count(Lot.score_class == LotClass.D.value)
 
     last_ingest = (
-        await db.execute(select(func.max(Lot.updated_at)))
+        await db.execute(
+            select(func.max(ImportRun.finished_at)).where(
+                ImportRun.source == "efrsb_public",
+                ImportRun.status == "finished",
+            )
+        )
     ).scalar()
     alerts_sent_today = (
         await db.execute(

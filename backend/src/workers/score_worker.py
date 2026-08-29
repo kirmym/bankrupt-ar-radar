@@ -12,7 +12,7 @@ from src.config import get_settings
 from src.database import async_session_factory
 from src.models.entities import Claim, Lot, ScoreSnapshot
 from src.schemas.lot import ClaimSchema, DebtorPartySchema
-from src.scoring.v1 import ScoreInput, compute_ev_and_class
+from src.scoring.v1 import ScoreInput, _claim_rank, compute_ev_and_class
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -25,6 +25,7 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
         .where(Lot.id == lot_id)
         .options(
             selectinload(Lot.claims).selectinload(Claim.debtor_party),
+            selectinload(Lot.claims).selectinload(Claim.guarantor_party),
         )
     )
     result = await session.execute(stmt)
@@ -32,17 +33,23 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
     if not lot:
         return None
 
-    # Дебитор из первого требования
-    debtor: DebtorPartySchema | None = None
-    if lot.claims:
-        claim = lot.claims[0]
-        if claim.debtor_party:
-            debtor = DebtorPartySchema.model_validate(claim.debtor_party, from_attributes=True)
-
-    # Claims
+    # Выбираем представительное требование детерминированно. Если в корзине
+    # несколько дебиторов, скоринг добавит стоп-фактор MULTIPLE_DEBTORS.
     claim_schemas = [
         ClaimSchema.model_validate(c, from_attributes=True) for c in lot.claims
     ]
+    primary_claim = max(claim_schemas, key=_claim_rank, default=None)
+    debtor: DebtorPartySchema | None = None
+    claim_debtors = [
+        claim.debtor_party
+        for claim in claim_schemas
+        if claim.debtor_party is not None and claim.debtor_party.inn
+    ]
+    debtor_inns = {claim.inn for claim in claim_debtors if claim.inn}
+    if len(debtor_inns) == 1:
+        debtor = claim_debtors[0]
+    elif primary_claim and primary_claim.debtor_party and not debtor_inns:
+        debtor = primary_claim.debtor_party
 
     inp = ScoreInput(
         lot_id=lot.id,
