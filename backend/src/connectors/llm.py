@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from src.config import get_settings
+
 if TYPE_CHECKING:
     pass
 
@@ -125,10 +127,11 @@ async def extract_facts_with_llm(text: str, openai_client: Any = None) -> dict:
 
     try:
         messages = build_extraction_prompt(text)
+        settings = get_settings()
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=settings.llm_model,
             messages=messages,
-            temperature=0.0,
+            temperature=settings.llm_temperature,
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content

@@ -2,13 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex]
   pull_request:
     branches: [main]
 
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ar_radar
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ar_radar"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ar_radar
     defaults:
       run:
         working-directory: backend
@@ -27,7 +43,7 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check .
 
       - name: Type check (mypy)
         run: uv run mypy src/
@@ -35,8 +51,46 @@ jobs:
       - name: Tests
         run: uv run pytest -v
 
+      - name: Validate migration chain
+        run: uv run alembic heads
+
+      - name: Apply migrations on PostgreSQL
+        run: uv run alembic upgrade head
+
       - name: Build wheel
         run: uv run python -m hatchling build -t wheel
+
+  bot:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src/
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --tag ar-radar:ci .
 
   web:
     runs-on: ubuntu-latest

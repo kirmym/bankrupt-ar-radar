@@ -68,7 +68,7 @@ cd ../web
 npm install
 npm run dev            # http://localhost:5173 (проксирует /api на :8000)
 
-# Прод-сборка фронта без Vite (статика из FastAPI):
+# Прод-сборка фронта через Vite, затем раздача статики из FastAPI:
 # npm run build && cd .. && docker compose up --build app
 ```
 
@@ -119,7 +119,7 @@ bankrupt-ar-radar/
 │   │   ├── config.py
 │   │   └── database.py
 │   ├── alembic/              # миграции
-│   └── tests/                # pytest (38 кейсов)
+│   └── tests/                # pytest regression suite
 ├── bot/                      # интерактивный бот (опциональный сервис)
 ├── web/                      # React 18 + Vite
 ├── docs/                     # доменная документация

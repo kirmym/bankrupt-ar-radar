@@ -25,11 +25,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.database import Base
 from src.models.enums import (
+    AlertDeliveryStatus,
     ClaimKind,
+    DocumentProcessingStatus,
     LotClass,
     OrgStatus,
     PartyRole,
     PersonKind,
+    PriceScheduleStatus,
     Scenario,
     TradeForm,
     TradeKind,
@@ -171,6 +174,11 @@ class Lot(Base):
         DateTime(timezone=True)
     )
     cutoff_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    price_schedule_status: Mapped[str] = mapped_column(
+        enum_string(PriceScheduleStatus, 20), default=PriceScheduleStatus.UNKNOWN.value
+    )
+    price_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    price_source: Mapped[str | None] = mapped_column(String(50))
 
     deposit_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     deposit_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
@@ -197,6 +205,12 @@ class Lot(Base):
     score_gaps: Mapped[list[str]] = mapped_column(ARRAY(String(50)), default=list)
     score_max_bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     score_version: Mapped[str | None] = mapped_column(String(20))
+    # The score is valid only for the lot state known at this exact moment.
+    score_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    etp_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    etp_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    etp_failures: Mapped[int] = mapped_column(Integer, default=0)
+    etp_last_error: Mapped[str | None] = mapped_column(String(500))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
@@ -224,6 +238,7 @@ class Lot(Base):
         Index("ix_lots_score_ev", "score_ev"),
         Index("ix_lots_is_receivable", "is_receivable"),
         Index("ix_lots_current_interval_to", "current_interval_to"),
+        Index("ix_lots_etp_retry_at", "etp_next_retry_at"),
     )
 
 
@@ -300,6 +315,10 @@ class Party(Base):
     fssp_uncollectible: Mapped[bool] = mapped_column(Boolean, default=False)
 
     source_as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrich_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrich_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enrich_failures: Mapped[int] = mapped_column(Integer, default=0)
+    enrich_last_error: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -327,6 +346,7 @@ class Party(Base):
         UniqueConstraint("role", "inn", name="uq_party_role_inn"),
         Index("ix_parties_role_status", "role", "status"),
         Index("ix_parties_kad_bankruptcy", "kad_bankruptcy_open"),
+        Index("ix_parties_enrich_retry_at", "enrich_next_retry_at"),
     )
 
 
@@ -417,9 +437,21 @@ class Document(Base):
     text: Mapped[str | None] = mapped_column(Text)
     extracted_facts: Mapped[dict | None] = mapped_column(JSONB)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    download_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    processing_status: Mapped[str] = mapped_column(
+        enum_string(DocumentProcessingStatus, 20),
+        default=DocumentProcessingStatus.PENDING.value,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_documents_retry_at", "next_retry_at"),
+        Index("ix_documents_processing_retry", "processing_status", "next_retry_at"),
     )
 
 
@@ -516,10 +548,19 @@ class AlertState(Base):
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"), index=True)
     chat_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     alerted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[str] = mapped_column(
+        enum_string(AlertDeliveryStatus, 20), default=AlertDeliveryStatus.PENDING.value
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (
         Index("ix_alerts_state_lot_time", "lot_id", "alerted_at"),
         Index("ix_alerts_state_lot_chat_time", "lot_id", "chat_id", "alerted_at"),
+        Index("ix_alerts_state_status_lease", "status", "lease_until"),
     )
 
 

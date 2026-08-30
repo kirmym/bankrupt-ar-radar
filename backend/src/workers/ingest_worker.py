@@ -19,6 +19,7 @@ from src.connectors.efrsb import (
     parse_price,
 )
 from src.models.entities import (
+    Claim,
     Document,
     ImportCheckpoint,
     ImportRun,
@@ -34,10 +35,12 @@ from src.models.enums import (
     ClaimKind,
     PartyRole,
     PersonKind,
+    PriceScheduleStatus,
     TradeForm,
     TradeKind,
     TradeStatus,
 )
+from src.workers.document_lock import lock_document
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -142,6 +145,24 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
 
     raw_content = card.get("raw_content")
     if isinstance(raw_content, str) and raw_content:
+        raw_content = raw_content[:1_000_000]
+        # Compare against all snapshots of the source URL, not just the latest
+        # one, so alternating source HTML cannot grow the table indefinitely.
+        existing_snapshot = await db.scalar(
+            select(RawSnapshot)
+            .where(
+                RawSnapshot.source == "efrsb_public",
+                RawSnapshot.source_url == card["efrsb_url"],
+                RawSnapshot.raw_content == raw_content,
+            )
+            .order_by(RawSnapshot.captured_at.desc())
+            .limit(1)
+        )
+        if existing_snapshot is not None:
+            trade.raw_snapshot_id = existing_snapshot.id
+            trade.raw_snapshot = existing_snapshot
+            raw_content = None
+    if isinstance(raw_content, str) and raw_content:
         snapshot = RawSnapshot(
             source="efrsb_public",
             source_url=card["efrsb_url"],
@@ -151,6 +172,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         db.add(snapshot)
         await db.flush()
         trade.raw_snapshot_id = snapshot.id
+        trade.raw_snapshot = snapshot
 
     # Лот
     lot_no = card.get("lot_no", 1)
@@ -183,17 +205,24 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         "nominal_claimed",
         "deposit_amount",
         "deposit_percent",
-        "current_interval_from",
-        "current_interval_to",
     ):
         value = card.get(field)
         if value is not None:
             setattr(lot, field, value)
-    current_price = card.get("current_price")
-    if current_price is not None:
-        lot.current_price = current_price
+    # A successfully parsed detail card is authoritative, including explicit
+    # ``None`` when no interval is active.  Partial list cards omit the key and
+    # therefore keep the last confirmed value.
+    if "current_price" in card:
+        lot.current_price = card["current_price"]
     elif lot.current_price is None and card.get("start_price") is not None:
         lot.current_price = card["start_price"]
+    if "current_interval_from" in card:
+        lot.current_interval_from = card["current_interval_from"]
+    if "current_interval_to" in card:
+        lot.current_interval_to = card["current_interval_to"]
+    for field in ("price_schedule_status", "price_observed_at", "price_source"):
+        if field in card:
+            setattr(lot, field, card[field])
     for field in ("classifier_codes", "classifier_labels"):
         value = card.get(field)
         if value:
@@ -205,9 +234,14 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
 
     # Перезаписываем расписание атомарно: источник может изменить шаги публички.
     interval_rows = card.get("price_intervals") or []
-    if interval_rows:
+    if "price_intervals" in card:
         await db.execute(delete(PriceInterval).where(PriceInterval.lot_id == lot.id))
         active_interval = None
+        latest_ended_row = max(
+            (row for row in interval_rows if row.get("ends_at") is not None),
+            key=lambda row: row["ends_at"],
+            default=None,
+        )
         for row in interval_rows:
             interval = PriceInterval(
                 lot_id=lot.id,
@@ -224,6 +258,19 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             lot.current_price = active_interval.price
             lot.current_interval_from = active_interval.starts_at
             lot.current_interval_to = active_interval.ends_at
+            lot.price_schedule_status = PriceScheduleStatus.PARSED.value
+        else:
+            # The schedule is present but currently outside all intervals.
+            # Clear its price, but retain the last known end time.  This makes
+            # an expired auction explicitly ineligible for alert delivery.
+            lot.current_price = None
+            lot.current_interval_from = (
+                latest_ended_row.get("starts_at") if latest_ended_row else None
+            )
+            lot.current_interval_to = (
+                latest_ended_row.get("ends_at") if latest_ended_row else None
+            )
+            lot.price_schedule_status = PriceScheduleStatus.EXPIRED.value
 
     for file_data in card.get("documents") or []:
         if isinstance(file_data, str):
@@ -231,6 +278,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         file_url = file_data.get("url")
         if not file_url:
             continue
+        await lock_document(db, lot.id, file_url)
         document = (
             await db.execute(
                 select(Document).where(
@@ -285,22 +333,36 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             db.add(debtor)
             await db.flush()
         # claim
-        from src.models.entities import Claim
-
-        claim_stmt = select(Claim).where(Claim.lot_id == lot.id)
+        claim_stmt = select(Claim).where(Claim.lot_id == lot.id).order_by(Claim.id)
         result = await db.execute(claim_stmt)
-        claim = result.scalar_one_or_none()
-        if not claim:
+        claims = result.scalars().all()
+        claim: Claim | None = None
+        if not claims:
             claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
             db.add(claim)
             await db.flush()
-        if card.get("nominal_claimed") is not None:
-            claim.principal = card["nominal_claimed"]
-        claim.debtor_party_id = debtor.id
-        if card.get("has_judgment"):
-            claim.has_judgment = True
-        if card.get("has_writ"):
-            claim.has_writ = True
+        elif len(claims) == 1:
+            claim = claims[0]
+        else:
+            # A list card has one nominal/debtor pair and cannot safely be
+            # mapped onto a bundle of detailed claims.
+            logger.warning(
+                "ingest: skip claim overwrite for lot %d with %d claims",
+                lot.id,
+                len(claims),
+            )
+
+        if claim is not None:
+            if card.get("nominal_claimed") is not None:
+                claim.principal = card["nominal_claimed"]
+            claim.debtor_party_id = debtor.id
+            if card.get("has_judgment"):
+                claim.has_judgment = True
+            if card.get("has_writ"):
+                claim.has_writ = True
+            # Relationship changes do not update Lot.updated_at by themselves,
+            # so mark its score stale until the score worker recomputes it.
+            lot.updated_at = datetime.now(UTC)
 
     return trade, lot
 
@@ -361,6 +423,11 @@ async def run_ingest() -> int:
                         classifier_codes, classifier_labels = parse_classifier(raw_content)
                     except SourceAccessError:
                         raise
+                    except SourceParseError:
+                        # Preserve the parser contract so the outer handler
+                        # marks the import as failed instead of checkpointing
+                        # a silently partial lot.
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "ingest: detail parse failed for %s: %s",
@@ -419,10 +486,6 @@ async def run_ingest() -> int:
                         {
                             "description_html": detail.get("description_html"),
                             "price_reduction_html": detail.get("price_reduction_html"),
-                            "price_intervals": price_intervals,
-                            "current_price": current_interval.get("price") if current_interval else None,
-                            "current_interval_from": current_interval.get("starts_at") if current_interval else None,
-                            "current_interval_to": current_interval.get("ends_at") if current_interval else None,
                             "cutoff_price": cutoff_price,
                             "deposit_amount": None if "%" in deposit_text else deposit_value,
                             "deposit_percent": deposit_value if "%" in deposit_text else None,
@@ -440,8 +503,32 @@ async def run_ingest() -> int:
                                 marker in f"{title} {description or ''}".lower()
                                 for marker in ("единый лот", "корзина требований", "в составе лота")
                             ),
+                            "price_observed_at": datetime.now(UTC),
+                            "price_source": "efrsb_public",
                         }
                     )
+                    if price_intervals:
+                        card.update(
+                            {
+                                "price_intervals": price_intervals,
+                                "current_price": current_interval.get("price") if current_interval else None,
+                                "current_interval_from": current_interval.get("starts_at") if current_interval else None,
+                                "current_interval_to": current_interval.get("ends_at") if current_interval else None,
+                                "price_schedule_status": (
+                                    PriceScheduleStatus.PARSED.value
+                                    if current_interval
+                                    else PriceScheduleStatus.EXPIRED.value
+                                ),
+                            }
+                        )
+                    elif detail.get("price_reduction_html"):
+                        card["price_schedule_status"] = PriceScheduleStatus.UNPARSED.value
+                        logger.warning(
+                            "ingest: price schedule was present but could not be parsed for %s",
+                            item.get("url"),
+                        )
+                    else:
+                        card["price_schedule_status"] = PriceScheduleStatus.NOT_PRESENT.value
                 else:
                     # При недоступной карточке сохраняем только поля списка.
                     # Нельзя затирать уже подтвержденные признаки значениями False.
@@ -480,6 +567,7 @@ async def run_ingest() -> int:
             run.finished_at = datetime.now(UTC)
             await db.commit()
             logger.error("ingest: parser contract failed: %s", exc)
+            raise
         except SourceAccessError as exc:
             await db.rollback()
             run.status = "paused"
@@ -488,6 +576,7 @@ async def run_ingest() -> int:
             run.finished_at = datetime.now(UTC)
             await db.commit()
             logger.warning("ingest: source access paused: %s", exc)
+            raise
         except Exception as exc:
             await db.rollback()
             run.status = "failed"

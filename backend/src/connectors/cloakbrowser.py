@@ -151,6 +151,11 @@ async def fetch_bytes_via_cloakbrowser(
                         break
                 if max_bytes is not None and content_length is not None and content_length > max_bytes:
                     raise CloakBrowserError("browser document exceeds configured size limit")
+                if max_bytes is not None and content_length is None:
+                    # Playwright's response.body() buffers the complete body,
+                    # so there is no safe way to enforce a hard limit after a
+                    # chunked response has already been received.
+                    raise CloakBrowserError("browser document size is unknown")
                 data = await response.body()
                 if max_bytes is not None and len(data) > max_bytes:
                     raise CloakBrowserError("browser document exceeds configured size limit")
@@ -162,8 +167,10 @@ async def fetch_bytes_via_cloakbrowser(
                     f"CloakBrowser document download failed: {type(exc).__name__}"
                 ) from exc
             finally:
-                if context is not None and hasattr(context.request, "dispose"):
-                    await context.request.dispose()
+                # ``context.request`` belongs to the persistent CDP browser
+                # context.  Disposing it here breaks subsequent downloads that
+                # reuse the same authenticated CloakBrowser profile.
+                pass
     except CloakBrowserError:
         raise
     except Exception as exc:

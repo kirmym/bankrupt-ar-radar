@@ -5,16 +5,26 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from src.config import get_settings
 from src.connectors.enrich import enrich_party
 from src.database import async_session_factory
-from src.models.entities import Party
+from src.models.entities import Claim, Lot, Party
 from src.models.enums import PartyRole
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def enrich_retry_at(
+    now: datetime, failures: int, max_attempts: int | None = None
+) -> datetime:
+    """Return a bounded retry time without starving later debtors."""
+    if max_attempts is not None and failures >= max(1, max_attempts):
+        return now + timedelta(days=7)
+    minutes = min(15 * (2 ** min(max(failures - 1, 0), 7)), 24 * 60)
+    return now + timedelta(minutes=minutes)
 
 
 async def run_enrich(batch_size: int = 50) -> int:
@@ -22,7 +32,9 @@ async def run_enrich(batch_size: int = 50) -> int:
     logger.info("enrich: starting")
 
     async with async_session_factory() as session:
-        # Берём дебиторов, у которых source_as_of старше суток
+        now = datetime.now(UTC)
+        # A failed first page must not permanently block the rest of the
+        # backlog.  ``enrich_next_retry_at`` is advanced after every attempt.
         stmt = (
             select(Party)
             .where(Party.role == PartyRole.DEBTOR.value)
@@ -30,34 +42,86 @@ async def run_enrich(batch_size: int = 50) -> int:
             .where(
                 or_(
                     Party.source_as_of.is_(None),
-                    Party.source_as_of < datetime.now(UTC) - timedelta(days=1),
+                    Party.source_as_of < now - timedelta(days=1),
                 )
             )
-            .order_by(Party.source_as_of.asc().nulls_first())
+            .where(
+                or_(
+                    Party.enrich_next_retry_at.is_(None),
+                    Party.enrich_next_retry_at <= now,
+                )
+            )
+            .order_by(
+                Party.enrich_next_retry_at.asc().nulls_first(),
+                Party.source_as_of.asc().nulls_first(),
+                Party.id.asc(),
+            )
+            .with_for_update(skip_locked=True)
             .limit(batch_size)
         )
         result = await session.execute(stmt)
         debtors = result.scalars().all()
 
+        succeeded = 0
+        failed = 0
         for debtor in debtors:
+            debtor_id = debtor.id
+            attempt_at = datetime.now(UTC)
             try:
                 statuses = await enrich_party(debtor, session)
                 # One timestamp is used by scoring as the identity/status
                 # verification timestamp. FSSP/KAD results must not make a
                 # stale EGRUL status look fresh.
                 if statuses.get("egrul", False):
-                    debtor.source_as_of = datetime.now(UTC)
+                    updated_at = attempt_at
+                    debtor.source_as_of = updated_at
+                    debtor.enrich_attempted_at = updated_at
+                    debtor.enrich_next_retry_at = None
+                    debtor.enrich_failures = 0
+                    debtor.enrich_last_error = None
+                    # Party changes are score inputs.  Touch linked lots so
+                    # alerts wait for a rescore instead of sending old EVs.
+                    await session.execute(
+                        update(Lot)
+                        .where(Lot.claims.any(Claim.debtor_party_id == debtor.id))
+                        .values(updated_at=updated_at)
+                    )
                     await session.commit()
                     logger.info("enrich: %s done (%s)", debtor.inn, statuses)
+                    succeeded += 1
                 else:
-                    logger.warning("enrich: %s is stale (%s)", debtor.inn, statuses)
+                    failures = int(debtor.enrich_failures or 0) + 1
+                    debtor.enrich_attempted_at = attempt_at
+                    debtor.enrich_failures = failures
+                    debtor.enrich_next_retry_at = enrich_retry_at(
+                        attempt_at, failures, settings.enrich_max_attempts
+                    )
+                    debtor.enrich_last_error = (
+                        "EGRUL verification failed; "
+                        + ", ".join(f"{source}={ok}" for source, ok in statuses.items())
+                    )[:500]
+                    logger.warning("enrich: %s deferred (%s)", debtor.inn, statuses)
+                    failed += 1
                 await session.commit()
             except Exception:
                 logger.exception("enrich: failed for %s", debtor.inn)
                 await session.rollback()
+                retried = await session.get(Party, debtor_id, with_for_update={"skip_locked": True})
+                if retried is not None:
+                    failures = int(retried.enrich_failures or 0) + 1
+                    retried.enrich_attempted_at = attempt_at
+                    retried.enrich_failures = failures
+                    retried.enrich_next_retry_at = enrich_retry_at(
+                        attempt_at, failures, settings.enrich_max_attempts
+                    )
+                    retried.enrich_last_error = "unexpected worker exception"
+                    await session.commit()
+                failed += 1
 
-        logger.info("enrich: %d debtors processed", len(debtors))
-        return len(debtors)
+        logger.info(
+            "enrich: selected=%d succeeded=%d deferred=%d", len(debtors), succeeded, failed
+        )
+        return succeeded
 
 
 async def main() -> None:

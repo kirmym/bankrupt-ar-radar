@@ -41,10 +41,11 @@ export default function Dashboard() {
         <Card title="Всего лотов" value={stats.total_lots} />
         <Card title="Ликвидная ДЗ" value={stats.receivable_lots} />
         <Card title="Скоринг" value={stats.scored_lots} />
+        <Card title="Устаревший скоринг" value={stats.stale_scored_lots} />
         <Card title="Алертов сегодня" value={stats.alerts_sent_today} />
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <ClassCard label="🟢 A" count={stats.class_a} />
         <ClassCard label="🟡 B" count={stats.class_b} />
         <ClassCard label="🟠 C" count={stats.class_c} />

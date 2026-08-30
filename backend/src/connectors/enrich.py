@@ -1,6 +1,7 @@
 """Enrich-воркер — обогащение дебитора данными из открытых реестров."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from src.connectors.cloakbrowser import (
     CloakBrowserError,
     fetch_html_via_cloakbrowser,
 )
+from src.connectors.providers import provider_api_enabled
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,10 +26,62 @@ if TYPE_CHECKING:
     from src.models.entities import Party
 
 
-EGRUL_API = "https://egrul.nic.ru"
-FSSP_API = "https://api-ip.fssprus.ru"
-KAD_API = "https://bssys.com"
 logger = logging.getLogger(__name__)
+EGRUL_PUBLIC_SEARCH_URL = "https://egrul.nalog.ru/"
+
+
+async def _fetch_egrul_rows(inn: str) -> list[dict[str, object]] | None:
+    """Submit the FNS public web form and parse its short-lived result page.
+
+    The form is part of the public EGRUL interface, not a configurable third-
+    party API: it needs neither a token nor a paid account.  A CAPTCHA is left
+    for the configured CloakBrowser fallback below.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            search = await client.post(
+                EGRUL_PUBLIC_SEARCH_URL,
+                data={"query": inn, "region": "", "PreventChromeAutocomplete": ""},
+            )
+            search.raise_for_status()
+            payload = search.json()
+            if not isinstance(payload, dict) or payload.get("captchaRequired"):
+                return None
+            token = payload.get("t")
+            if not isinstance(token, str) or not token:
+                return None
+
+            result_url = f"{EGRUL_PUBLIC_SEARCH_URL}search-result/{token}"
+            for delay in (0.0, 0.5, 1.0):
+                if delay:
+                    await asyncio.sleep(delay)
+                result = await client.get(result_url)
+                result.raise_for_status()
+                result_payload = result.json()
+                if not isinstance(result_payload, dict) or result_payload.get("captchaRequired"):
+                    return None
+                rows = result_payload.get("rows")
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
+    except (httpx.HTTPError, ValueError, TypeError):
+        logger.exception("EGRUL public search failed for INN %s", inn)
+    return None
+
+
+def _apply_egrul_row(party: Party, row: dict[str, object]) -> bool:
+    """Apply a validated FNS search row without inferring a legal status."""
+    name = row.get("n")
+    ogrn = row.get("o")
+    parsed_name = name.strip() if isinstance(name, str) else ""
+    parsed_ogrn = ogrn.strip() if isinstance(ogrn, str) and ogrn.isdigit() else ""
+    if not parsed_name and not parsed_ogrn:
+        return False
+    if parsed_name and not party.name:
+        party.name = parsed_name
+    if parsed_ogrn and not party.ogrn:
+        party.ogrn = parsed_ogrn
+    party.source_as_of = datetime.now(UTC)
+    return True
 
 
 def _is_challenge(status_code: int, body: str) -> bool:
@@ -44,11 +98,20 @@ async def _fetch_html(
     """Fetch a parser page and retry a challenge through CloakBrowser."""
     settings = get_settings()
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+            max_redirects=5,
+        ) as client:
             if method == "POST":
                 resp = await client.post(url, json=json_payload or {})
             else:
                 resp = await client.get(url)
+            initial_host = (urlparse(url).hostname or "").lower()
+            final_host = (urlparse(str(resp.url)).hostname or "").lower()
+            if final_host != initial_host:
+                logger.warning("source parser redirect left host allowlist: %s -> %s", url, resp.url)
+                return None
             if not _is_challenge(resp.status_code, resp.text):
                 resp.raise_for_status()
                 return resp.text
@@ -83,14 +146,25 @@ def _d(value: str | None, default: Decimal = Decimal(0)) -> Decimal:
 
 
 async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
-    """Enrich EGRUL data via the free API when enabled, otherwise HTML parser."""
+    """Enrich from the official FNS EGRUL public interface."""
     if not party.inn:
         return False
 
     inn = party.inn
-    url = f"https://egrul.nic.ru/search/?q={inn}&type=ul"
+    url = f"https://egrul.nalog.ru/index.html?query={quote_plus(inn)}"
 
     try:
+        rows = await _fetch_egrul_rows(inn)
+        if rows:
+            exact_row = next(
+                (row for row in rows if str(row.get("i", "")) == inn), rows[0]
+            )
+            if _apply_egrul_row(party, exact_row):
+                return True
+
+        # The browser path is retained as the CAPTCHA fallback.  It also
+        # supports deployments where the FNS changes the JSON response but
+        # keeps a rendered public result card.
         html = await _fetch_html(url)
         if not html:
             return False
@@ -100,7 +174,7 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
         # Extract only source-specific organization markers. A generic page
         # heading (for example, "Поиск ЕГРЮЛ") is not an organization record.
         name_el = tree.css_first(
-            ".org-name, [data-org-name], [itemprop='legalName'], h1[data-inn]"
+            ".org-name, [data-org-name], [itemprop='legalName'], .vyp-short-info__name, h1[data-inn]"
         )
         parsed_name = name_el.text().strip() if name_el else ""
 
@@ -142,9 +216,12 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
 
     try:
         source_settings = get_settings()
-        if "fssp" in source_settings.free_api_sources_list:
+        fssp_api_url = getattr(source_settings, "fssp_api_url", "https://api-ip.fssprus.ru")
+        if provider_api_enabled(
+            "fssp", source_settings.free_api_sources_list, fssp_api_url
+        ):
             endpoint = "legal" if len(party.inn) == 10 else "physical"
-            url = f"{source_settings.fssp_api_url.rstrip('/')}/api/v1.0/search/{endpoint}"
+            url = f"{fssp_api_url.rstrip('/')}/api/v1.0/search/{endpoint}"
             params = {"query": party.inn}
             if source_settings.fssp_api_token:
                 params["token"] = source_settings.fssp_api_token
@@ -198,7 +275,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
             "CaseNumbers": [],
             "Hearings": [],
         }
-        if "kad" in get_settings().free_api_sources_list:
+        if provider_api_enabled("kad", get_settings().free_api_sources_list, url):
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code != 200:
@@ -220,6 +297,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
         if not html:
             return False
         lowered = html.lower()
+        tree = HTMLParser(html)
         count_match = re.search(r"(?:найдено|всего|дел[ао])\D{0,30}(\d+)", lowered)
         if count_match:
             party.kad_as_defendant_count = int(count_match.group(1))
@@ -227,7 +305,14 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
             party.kad_as_defendant_count = 0
         else:
             return False
-        party.kad_bankruptcy_open = "банкрот" in lowered
+        # Only inspect actual case rows.  Searching the whole page turns a
+        # navigation label such as "банкротство" into a false positive.
+        case_texts = []
+        for node in tree.css("tr, .b-case, .case-item, [data-case-number]"):
+            node_text = node.text().strip().lower()
+            if re.search(r"[а-яa-z]\d{1,3}-\d+/\d{4}", node_text):
+                case_texts.append(node_text)
+        party.kad_bankruptcy_open = any("банкрот" in text for text in case_texts)
         return True
     except Exception:
         logger.exception("kad enrichment failed for %s", party.inn)

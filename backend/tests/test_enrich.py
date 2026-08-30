@@ -14,11 +14,15 @@ from src.models.enums import PartyRole
 async def test_egrul_html_parser_sets_active_status(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.connectors import enrich
 
+    async def no_rows(_inn: str) -> None:
+        return None
+
     monkeypatch.setattr(
         enrich,
         "get_settings",
         lambda: SimpleNamespace(free_api_sources_list=set()),
     )
+    monkeypatch.setattr(enrich, "_fetch_egrul_rows", no_rows)
     async def fake_html(_url: str) -> str:
         return _html(
             '<div class="org-name">ООО Ромашка</div>'
@@ -63,11 +67,15 @@ async def test_fssp_parser_is_used_when_api_is_not_enabled(monkeypatch: pytest.M
 async def test_egrul_generic_search_page_does_not_refresh_old_party(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.connectors import enrich
 
+    async def no_rows(_inn: str) -> None:
+        return None
+
     monkeypatch.setattr(
         enrich,
         "get_settings",
         lambda: SimpleNamespace(free_api_sources_list=set()),
     )
+    monkeypatch.setattr(enrich, "_fetch_egrul_rows", no_rows)
 
     async def fake_html(_url: str) -> str:
         return _html("<h1>Поиск ЕГРЮЛ</h1><p>Статус: действующая</p><p>Введите ИНН</p>")
@@ -84,6 +92,24 @@ async def test_egrul_generic_search_page_does_not_refresh_old_party(monkeypatch:
     assert await enrich.enrich_from_egrul(party, None) is False
     assert party.status == "active"
     assert party.source_as_of == old_timestamp
+
+
+@pytest.mark.asyncio
+async def test_egrul_public_search_row_sets_identity_without_guessing_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.connectors import enrich
+
+    async def rows(_inn: str) -> list[dict[str, object]]:
+        return [{"i": "7707083893", "n": "ООО Ромашка", "o": "1027700132195"}]
+
+    monkeypatch.setattr(enrich, "_fetch_egrul_rows", rows)
+    party = Party(role=PartyRole.DEBTOR.value, inn="7707083893")
+
+    assert await enrich.enrich_from_egrul(party, None) is True
+    assert party.name == "ООО Ромашка"
+    assert party.ogrn == "1027700132195"
+    assert party.status is None
 
 
 @pytest.mark.asyncio
@@ -144,6 +170,33 @@ async def test_fssp_api_uses_legal_endpoint_for_ten_digit_inn(monkeypatch: pytes
     party = Party(role=PartyRole.DEBTOR.value, inn="7707083893")
     assert await enrich.enrich_from_fssp(party, None) is True
     assert requested == ["https://api-ip.fssprus.ru/api/v1.0/search/legal"]
+
+
+@pytest.mark.asyncio
+async def test_kad_parser_does_not_use_navigation_text_as_bankruptcy_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.connectors import enrich
+
+    monkeypatch.setattr(
+        enrich,
+        "get_settings",
+        lambda: SimpleNamespace(free_api_sources_list=set(), cloakbrowser_cdp_url=""),
+    )
+
+    async def fake_html(_url: str) -> str:
+        return _html(
+            "<nav>Банкротство</nav>"
+            "<p>Всего дел: 1</p>"
+            "<table><tr><td>А40-123/2023</td><td>Взыскание долга</td></tr></table>"
+        )
+
+    monkeypatch.setattr(enrich, "_fetch_html", fake_html)
+    party = Party(role=PartyRole.DEBTOR.value, inn="7707083893")
+
+    assert await enrich.enrich_from_kad(party, None) is True
+    assert party.kad_as_defendant_count == 1
+    assert party.kad_bankruptcy_open is False
 
 
 def _html(body: str) -> str:

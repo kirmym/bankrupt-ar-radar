@@ -88,6 +88,7 @@ class StopFactor(StrEnum):
     UNSUPPORTED_CURRENCY = "unsupported_currency"
     REGISTRY_CLAIM_ON_BANKRUPT = "registry_claim_on_bankrupt"
     NOMINAL_UNVERIFIED = "nominal_unverified"
+    CURRENT_PRICE_UNAVAILABLE = "current_price_unavailable"
 
 
 class Gap(StrEnum):
@@ -96,10 +97,35 @@ class Gap(StrEnum):
     BO_MISSING = "bo_missing"
     KAD_MISSING = "kad_missing"
     FSSP_MISSING = "fssp_missing"
+    KAD_BANKRUPTCY_OPEN = "kad_bankruptcy_open"
+    FSSP_UNCOLLECTIBLE = "fssp_uncollectible"
     SCHEDULE_UNPARSED = "schedule_unparsed"
     NOMINAL_ESTIMATED = "nominal_estimated"  # Номинал взят из start_price
     NOMINAL_MISSING = "nominal_missing"
     BUNDLE_NO_DETAIL = "bundle_no_detail"
+
+
+class PriceScheduleStatus(StrEnum):
+    UNKNOWN = "unknown"
+    PARSED = "parsed"
+    NOT_PRESENT = "not_present"
+    UNPARSED = "unparsed"
+    EXPIRED = "expired"
+    STALE = "stale"
+
+
+class DocumentProcessingStatus(StrEnum):
+    PENDING = "pending"
+    RETRYING = "retrying"
+    COMPLETED = "completed"
+    NEEDS_REVIEW = "needs_review"
+
+
+class AlertDeliveryStatus(StrEnum):
+    PENDING = "pending"
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED = "failed"
 
 
 # Белый список классификаторов ЕФРСБ для дебиторской задолженности

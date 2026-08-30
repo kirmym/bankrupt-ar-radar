@@ -23,8 +23,7 @@ export default function LotDetail() {
   if (!lot) return <div className="p-6 text-red-500">Лот не найден</div>;
 
   const cls = lot.score_class || "D";
-  const debtor = lot.claims?.[0]?.debtor_party;
-  const claim = lot.claims?.[0];
+  const claims = lot.claims ?? [];
 
   return (
     <div className="space-y-6">
@@ -58,15 +57,31 @@ export default function LotDetail() {
         <Stat title="Номинал" value={fmtMoney(lot.nominal_claimed)} />
         <Stat title="Max bid" value={fmtMoney(lot.score_max_bid)} />
         <Stat title="Сценарий" value={lot.score_scenario || "—"} />
+        <Stat title="Статус графика цены" value={lot.price_schedule_status || "unknown"} />
         <Stat
           title="До конца интервала"
           value={`${fmtRelative(lot.current_interval_to)} (${fmtDate(lot.current_interval_to)})`}
         />
       </div>
 
-      {debtor && <DebtorCard debtor={debtor} />}
+      {lot.price_schedule_status === "unparsed" && (
+        <div className="bg-amber-50 border border-amber-200 rounded p-4 text-sm text-amber-900">
+          График снижения цены не распознан. Лот исключён из автоматических алертов до
+          подтверждения актуальной цены.
+        </div>
+      )}
 
-      {claim && <ClaimCard claim={claim} />}
+      {claims.map((claim, index) => (
+        <section key={claim.id} className="space-y-4">
+          {claims.length > 1 && (
+            <h2 className="text-lg font-semibold text-slate-800">
+              Требование {index + 1} из {claims.length}
+            </h2>
+          )}
+          {claim.debtor_party && <DebtorCard debtor={claim.debtor_party} />}
+          <ClaimCard claim={claim} />
+        </section>
+      ))}
 
       {lot.score_stop_factors?.length > 0 && (
         <div className="bg-red-50 border border-red-200 rounded p-4">

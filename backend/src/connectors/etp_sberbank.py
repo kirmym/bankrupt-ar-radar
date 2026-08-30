@@ -35,14 +35,19 @@ class SberbankAdapter(EtpAdapter):
         tree = HTMLParser(html)
 
         current_price = None
-        price_el = tree.css_first(".price-block__current, .current-price, [class*='current']")
+        price_el = tree.css_first(
+            ".price-block__current, .current-price, [data-field='current-price']"
+        )
         if price_el:
             current_price = _parse_price(price_el.text())
 
         interval_to = None
-        deadline_el = tree.css_first(".deadline, [class*='deadline']")
+        deadline_el = tree.css_first(".deadline, [data-field='deadline']")
         if deadline_el:
             interval_to = _parse_dt(deadline_el.text())
+
+        if current_price is None and interval_to is None:
+            raise EtpAccessError("Sberbank parser contract returned no lot fields")
 
         return EtpLotUpdate(
             etp_trade_id=etp_trade_id,

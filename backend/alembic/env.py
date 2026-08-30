@@ -4,12 +4,11 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-
 from src.config import get_settings
 from src.database import Base
 from src.models import entities  # noqa: F401
@@ -50,7 +49,15 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
     async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
+        # A rolling deployment can start more than one container.  The
+        # session-level lock serializes schema upgrades without relying on the
+        # deployment platform to provide a release phase.
+        lock_key = int(settings.worker_leader_lock_key)
+        await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": lock_key})
+        try:
+            await connection.run_sync(do_run_migrations)
+        finally:
+            await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
     await connectable.dispose()
 
 

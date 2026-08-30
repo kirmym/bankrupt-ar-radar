@@ -4,22 +4,43 @@ from __future__ import annotations
 import asyncio
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING
 
 import httpx
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.config import settings
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
 
-def fmt_money(value: Decimal | float | int | None) -> str:
+class ApiLot(BaseModel):
+    """The small, validated API contract used by the interactive bot."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    score_class: str | None = None
+    score_ev: Decimal | None = None
+    score_ev_low: Decimal | None = None
+    score_ev_high: Decimal | None = None
+    current_price: Decimal | None = None
+    score_max_bid: Decimal | None = None
+    score_scenario: str | None = None
+    nominal_claimed: Decimal | None = None
+    current_interval_to: str | None = None
+    score_stop_factors: list[str] = Field(default_factory=list)
+
+
+class ApiLotList(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[ApiLot]
+
+
+def fmt_money(value: Decimal | float | None) -> str:
     if value is None:
         return "—"
     try:
@@ -55,7 +76,8 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
                 headers=headers,
             )
             resp.raise_for_status()
-            lots.extend(resp.json().get("items", []))
+            payload = ApiLotList.model_validate(resp.json())
+            lots.extend(item.model_dump(mode="json") for item in payload.items)
         return sorted(
             lots,
             key=lambda lot: Decimal(str(lot.get("score_ev") or 0)),
@@ -109,7 +131,7 @@ async def cmd_top(message: types.Message) -> None:
         return
     try:
         lots = await fetch_lots_a_b(settings.api_base_url, limit=10)
-    except Exception as e:
+    except (httpx.HTTPError, ValidationError, ValueError, ArithmeticError) as e:
         await message.answer(f"❌ Не удалось получить данные: {e}")
         return
 

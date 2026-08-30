@@ -75,6 +75,14 @@ def etp_refresh() -> None:
 
 
 @app.command()
+def workers() -> None:
+    """Запустить singleton-планировщик фоновых воркеров."""
+    from src.runtime import run_worker_scheduler
+
+    asyncio.run(run_worker_scheduler())
+
+
+@app.command()
 def init_db() -> None:
     """Создать таблицы (для dev)."""
     from src.database import Base, engine

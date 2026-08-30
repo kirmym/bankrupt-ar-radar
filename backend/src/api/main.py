@@ -42,6 +42,7 @@ from src.schemas.lot import (
     LotListSchema,
     LotSchema,
 )
+from src.version import VERSION
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="AR Radar API",
     description="Радар дебиторской задолженности — API",
-    version="0.1.0",
+    version=VERSION,
     lifespan=lifespan,
 )
 
@@ -75,7 +76,7 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
-    return HealthResponse(version="0.1.0")
+    return HealthResponse(version=VERSION)
 
 
 @app.get("/ready", tags=["system"])
@@ -188,6 +189,8 @@ async def list_lots(
     if trade_status:
         q = q.where(Trade.status == trade_status.value)
     if deadline_before is not None:
+        if deadline_before.tzinfo is None:
+            raise HTTPException(status_code=422, detail="deadline_before must include a timezone")
         q = q.where(Lot.current_interval_to <= deadline_before)
 
     count_q = select(func.count()).select_from(q.subquery())
@@ -242,19 +245,23 @@ async def get_stats(
 ) -> DashboardStats:
     """Дашборд — агрегированная статистика."""
 
-    async def _count(where=None) -> int:
-        stmt = select(func.count(Lot.id))
-        if where is not None:
-            stmt = stmt.where(where)
-        return (await db.execute(stmt)).scalar() or 0
-
-    total = await _count()
-    receivable = await _count(Lot.is_receivable == True)  # noqa: E712
-    scored = await _count(Lot.score_class.isnot(None))
-    a_count = await _count(Lot.score_class == LotClass.A.value)
-    b_count = await _count(Lot.score_class == LotClass.B.value)
-    c_count = await _count(Lot.score_class == LotClass.C.value)
-    d_count = await _count(Lot.score_class == LotClass.D.value)
+    counts = (
+        await db.execute(
+            select(
+                func.count(Lot.id),
+                func.count(Lot.id).filter(Lot.is_receivable == True),  # noqa: E712
+                func.count(Lot.id).filter(Lot.score_class.isnot(None)),
+                func.count(Lot.id).filter(Lot.score_class == LotClass.A.value),
+                func.count(Lot.id).filter(Lot.score_class == LotClass.B.value),
+                func.count(Lot.id).filter(Lot.score_class == LotClass.C.value),
+                func.count(Lot.id).filter(Lot.score_class == LotClass.D.value),
+                func.count(Lot.id).filter(
+                    Lot.score_class.isnot(None),
+                    or_(Lot.score_updated_at.is_(None), Lot.score_updated_at < Lot.updated_at),
+                ),
+            )
+        )
+    ).one()
 
     last_ingest = (
         await db.execute(
@@ -273,13 +280,14 @@ async def get_stats(
     ).scalar() or 0
 
     return DashboardStats(
-        total_lots=total,
-        receivable_lots=receivable,
-        scored_lots=scored,
-        class_a=a_count,
-        class_b=b_count,
-        class_c=c_count,
-        class_d=d_count,
+        total_lots=counts[0],
+        receivable_lots=counts[1],
+        scored_lots=counts[2],
+        class_a=counts[3],
+        class_b=counts[4],
+        class_c=counts[5],
+        class_d=counts[6],
+        stale_scored_lots=counts[7],
         alerts_sent_today=alerts_sent_today,
         last_ingest_at=last_ingest,
     )

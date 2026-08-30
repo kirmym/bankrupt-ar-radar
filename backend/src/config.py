@@ -15,16 +15,12 @@ class Settings(BaseSettings):
 
     # Database (Railway отдаёт postgres:// — приводим к asyncpg-драйверу)
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ar_radar"
-    sync_database_url: str = ""
-
-    # Single-process deploy: воркеры и бот живут в процессе API
+    # The API may host the scheduler in small deployments.  A PostgreSQL
+    # advisory lock guarantees that only one instance becomes the leader.
     enable_workers: bool = True
-    enable_bot: bool = True
+    worker_leader_lock_key: int = 842_917_331
     # Веб-статика (собранный Vite dist), раздаваемая FastAPI
     web_dist_dir: str = ""
-
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
 
     # App
     app_env: str = "development"
@@ -38,9 +34,6 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""
 
-    # ЕФРСБ REST
-    efrsb_api_url: str = "https://bank-publications-demo.fedresurs.ru"
-    efrsb_api_token: str = ""
     efrsb_public_url: str = "https://bankrot.fedresurs.ru"
     # CDP endpoint already opened in CloakBrowser; optional challenge fallback.
     cloakbrowser_cdp_url: str = ""
@@ -73,11 +66,20 @@ class Settings(BaseSettings):
     # Intervals
     ingest_interval_minutes: int = 15
     enrich_interval_minutes: int = 60
+    etp_interval_minutes: int = 15
     score_interval_minutes: int = 30
     alert_interval_minutes: int = 30
+    enrich_max_attempts: int = 8
+    etp_max_attempts: int = 8
+    document_max_attempts: int = 8
+    price_freshness_hours: int = 24
 
-    # Efdup check
-    efrsb_check_interval_minutes: int = 30
+    # Data retention is deliberately disabled by default.  Set a positive
+    # number after choosing an archival policy for a production deployment.
+    retention_days: int = 0
+    score_snapshot_retention_days: int = 180
+    alert_retention_days: int = 180
+    import_run_retention_days: int = 180
 
     @property
     def telegram_chat_ids_list(self) -> list[str]:

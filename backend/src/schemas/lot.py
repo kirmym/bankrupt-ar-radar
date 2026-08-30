@@ -102,6 +102,10 @@ class LotSchema(BaseModel):
     score_gaps: list[Gap] = Field(default_factory=list)
     score_max_bid: Decimal | None = None
     score_version: str | None = None
+    score_updated_at: datetime | None = None
+    price_schedule_status: str = "unknown"
+    price_observed_at: datetime | None = None
+    price_source: str | None = None
 
     price_intervals: list[PriceIntervalSchema] = Field(default_factory=list)
     claims: list[ClaimSchema] = Field(default_factory=list)
@@ -165,6 +169,10 @@ class DocumentSchema(BaseModel):
     downloaded_at: datetime | None = None
     text: str | None = None
     extracted_facts: dict | None = None
+    processing_status: str = "pending"
+    download_attempts: int = 0
+    next_retry_at: datetime | None = None
+    last_error: str | None = None
 
 
 # ── Скоринг ──────────────────────────────────────────────────────────────────
@@ -233,6 +241,7 @@ class DashboardStats(BaseModel):
     class_c: int
     class_d: int
     alerts_sent_today: int
+    stale_scored_lots: int = 0
     last_ingest_at: datetime | None = None
 
 
@@ -271,7 +280,7 @@ class FeedbackSchema(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.3.0"
     database: str = "not_checked"
     redis: str = "not_used"
 

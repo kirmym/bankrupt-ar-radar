@@ -8,6 +8,20 @@ export const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+// Keep the production API key out of the compiled bundle.  Users can enter it
+// once when they first submit feedback; sessionStorage limits its lifetime to
+// the current browser tab.
+api.interceptors.request.use((config) => {
+  if (typeof window !== "undefined") {
+    const key = window.sessionStorage.getItem("ar_radar_api_key");
+    if (key) {
+      config.headers = config.headers ?? {};
+      config.headers["X-API-Key"] = key;
+    }
+  }
+  return config;
+});
+
 export interface PriceInterval {
   seq: number;
   price: string;
@@ -75,6 +89,10 @@ export interface Lot {
   score_gaps: string[];
   score_max_bid?: string;
   score_version?: string;
+  score_updated_at?: string;
+  price_schedule_status?: string;
+  price_observed_at?: string;
+  price_source?: string;
   price_intervals: PriceInterval[];
   claims: Claim[];
   created_at: string;
@@ -107,6 +125,7 @@ export interface DashboardStats {
   class_c: number;
   class_d: number;
   alerts_sent_today: number;
+  stale_scored_lots: number;
   last_ingest_at?: string;
 }
 
@@ -120,10 +139,27 @@ export const statsApi = {
 };
 
 export const feedbackApi = {
-  create: (payload: {
+  create: async (payload: {
     lot_id: number;
     action: "watch" | "reject" | "bought";
     recovered_amount?: number;
     note?: string;
-  }) => api.post<Feedback>("/feedback", payload),
+  }) => {
+    try {
+      return await api.post<Feedback>("/feedback", payload);
+    } catch (error) {
+      if (
+        axios.isAxiosError(error) &&
+        error.response?.status === 401 &&
+        typeof window !== "undefined"
+      ) {
+        const key = window.prompt("Введите API-ключ AR Radar");
+        if (key?.trim()) {
+          window.sessionStorage.setItem("ar_radar_api_key", key.trim());
+          return await api.post<Feedback>("/feedback", payload);
+        }
+      }
+      throw error;
+    }
+  },
 };

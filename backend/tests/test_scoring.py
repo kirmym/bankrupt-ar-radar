@@ -529,6 +529,37 @@ def test_stale_debtor_verification_blocks_signal():
     assert StopFactor.DEBTOR_UNVERIFIED in result.stop_factors
 
 
+def test_debtor_risk_flags_are_not_reported_as_missing_data():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=make_debtor(fssp_uncollectible=True, kad_bankruptcy_open=True),
+            claims=[make_claim(has_writ=True)],
+        )
+    )
+    assert Gap.FSSP_UNCOLLECTIBLE in result.gaps
+    assert Gap.KAD_BANKRUPTCY_OPEN in result.gaps
+    assert Gap.FSSP_MISSING not in result.gaps
+    assert Gap.KAD_MISSING not in result.gaps
+
+
+def test_unconfirmed_current_price_blocks_an_otherwise_profitable_lot():
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            start_price=Decimal("100000"),
+            current_price=None,
+            current_price_confirmed=False,
+            debtor=make_debtor(cash=Decimal("10000000"), equity=Decimal("10000000")),
+            claims=[make_claim(principal=Decimal("3000000"), has_writ=True)],
+        )
+    )
+
+    assert result.score_class == LotClass.D
+    assert StopFactor.CURRENT_PRICE_UNAVAILABLE in result.stop_factors
+
+
 def test_multiple_debtors_block_total_score():
     first = make_claim(claim_id=1).model_copy(
         update={"debtor_party": make_debtor(inn="7707083893")}
@@ -570,3 +601,23 @@ def test_mixed_claim_evidence_uses_weighted_success_rates():
         )
     )
     assert mixed.ev < writ_only.ev
+
+
+def test_mixed_claims_apply_discount_and_time_per_claim():
+    debtor = make_debtor(cash=Decimal("10000000"), equity=Decimal("10000000"))
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            debtor=debtor,
+            claims=[
+                make_claim(principal=Decimal("1000000"), has_writ=True),
+                make_claim(principal=Decimal("900000")),
+            ],
+        )
+    )
+
+    # The enforcement claim uses discount A and 6 months; the undocumented
+    # claim uses discount C and 24 months.  A single representative discount
+    # would overstate this result by more than 150k RUB.
+    assert result.ev == Decimal("700197")

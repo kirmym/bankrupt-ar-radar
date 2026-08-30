@@ -17,7 +17,7 @@ from src.connectors.files import (
     extract_text_from_pdf,
     propose_fact_updates,
 )
-from src.connectors.llm import validate_llm_facts
+from src.connectors.llm import extract_facts_with_llm, validate_llm_facts
 from src.models.entities import Document
 from src.models.enums import TradeStatus
 from src.workers.etp_worker import normalize_trade_status
@@ -169,6 +169,67 @@ async def test_legacy_doc_is_downloaded_but_left_for_manual_review(monkeypatch: 
     assert result["status"] == "needs_review"
     assert doc.downloaded_at is None
     assert doc.text is None
+
+
+@pytest.mark.asyncio
+async def test_unsupported_document_host_is_marked_for_manual_review():
+    doc = Document(lot_id=1, url="https://example.invalid/file.pdf", title="Unknown")
+
+    result = await process_file(doc, 1, None)
+
+    assert result == {
+        "facts": {},
+        "source": "unsupported_host",
+        "status": "needs_review",
+    }
+
+
+@pytest.mark.asyncio
+async def test_download_error_is_deferred_with_exponential_backoff(monkeypatch: pytest.MonkeyPatch):
+    class FailingAdapter:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def download_file(self, _file):
+            raise RuntimeError("temporary upstream failure")
+
+    monkeypatch.setattr(
+        "src.workers.files_worker.adapter_for_document_url",
+        lambda _url: FailingAdapter,
+    )
+    doc = Document(lot_id=1, url="https://bankrot.fedresurs.ru/files/contract.pdf")
+
+    assert await process_file(doc, 1, None) is None
+    assert doc.download_attempts == 1
+    assert doc.next_retry_at is not None
+    assert doc.last_error == "RuntimeError: temporary upstream failure"
+
+
+@pytest.mark.asyncio
+async def test_llm_uses_configured_model_and_temperature(monkeypatch: pytest.MonkeyPatch):
+    calls: dict = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            calls.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"claim": {"principal": 1000}}'))]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    monkeypatch.setattr(
+        "src.connectors.llm.get_settings",
+        lambda: SimpleNamespace(llm_model="gpt-test", llm_temperature=0.25),
+    )
+
+    result = await extract_facts_with_llm("документ", client)
+
+    assert result["source"] == "llm"
+    assert calls["model"] == "gpt-test"
+    assert calls["temperature"] == 0.25
 
 
 def test_etp_status_normalization_is_conservative():

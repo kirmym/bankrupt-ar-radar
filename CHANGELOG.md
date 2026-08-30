@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 (2026-08-30) — operational reliability
+
+- Added fair retry queues for enrich, ETP refresh and documents, with durable attempt metadata and PostgreSQL `SKIP LOCKED` selection.
+- Added PostgreSQL advisory leader election for the embedded scheduler and migration serialization during overlapping deploys.
+- Replaced alert check-then-send flow with a durable per-recipient outbox lease and idempotency key.
+- Added source transport policy, official EGRUL hostname, ETP parser contracts, price freshness metadata and persisted `schedule_unparsed` state.
+- Made Docker dependency installation lockfile-driven; CI now checks all migrations, bot quality and Docker builds.
+- Added retention worker (disabled by default) and API stale-score visibility.
+
 ## 0.2.1 (2026-08-28) — ingest reliability
 
 - Parsed public-offer price intervals and persisted the current step for scoring and alerts.

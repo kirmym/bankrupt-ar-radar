@@ -75,27 +75,30 @@ class CdtAdapter(EtpAdapter):
 
         # Текущая цена
         current_price = None
-        price_el = tree.css_first(".current-price, .price-now, [class*='price']")
+        price_el = tree.css_first(".current-price, .price-now, [data-field='current-price']")
         if price_el:
             current_price = _parse_price(price_el.text())
 
         # Конец интервала
         interval_to = None
-        interval_el = tree.css_first(".interval-end, .deadline, [class*='deadline']")
+        interval_el = tree.css_first(".interval-end, .deadline, [data-field='deadline']")
         if interval_el:
             interval_to = _parse_dt(interval_el.text())
 
         # Задаток
         deposit_amount = None
-        deposit_el = tree.css_first(".deposit, [class*='deposit']")
+        deposit_el = tree.css_first(".deposit, [data-field='deposit']")
         if deposit_el:
             deposit_amount = _parse_price(deposit_el.text())
 
         # Статус
         status = None
-        status_el = tree.css_first(".status, .state, [class*='status']")
+        status_el = tree.css_first(".status, .state, [data-field='status']")
         if status_el:
             status = status_el.text().strip()
+
+        if all(value is None for value in (current_price, interval_to, deposit_amount, status)):
+            raise EtpAccessError("CDT parser contract returned no lot fields")
 
         return EtpLotUpdate(
             etp_trade_id=etp_trade_id,

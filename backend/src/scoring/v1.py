@@ -110,6 +110,38 @@ def _claim_rank(claim: ClaimSchema) -> tuple[Decimal, int, int, int, int, int]:
     )
 
 
+def _scenario_for_claim(claim: ClaimSchema, override: Scenario | None) -> Scenario:
+    if override is not None:
+        return override
+    if claim.has_writ:
+        return Scenario.ENFORCEMENT
+    if claim.has_judgment:
+        return Scenario.COURT
+    return Scenario.NEGOTIATION
+
+
+def _cost_for_scenario(scenario: Scenario, settings) -> Decimal:
+    if scenario == Scenario.ENFORCEMENT:
+        return Decimal(settings.cost_enforcement_rub)
+    if scenario == Scenario.COURT:
+        return Decimal(settings.cost_court_rub)
+    if scenario == Scenario.NEGOTIATION:
+        return Decimal(settings.cost_court_rub) * Decimal("0.5")
+    if scenario == Scenario.SUBSIDIARY:
+        return Decimal(settings.cost_bankruptcy_rub)
+    return Decimal(settings.cost_enforcement_rub)
+
+
+def _discount_for_scenario(scenario: Scenario, settings) -> Decimal:
+    if scenario == Scenario.ENFORCEMENT:
+        return Decimal(settings.default_discount_a)
+    if scenario == Scenario.COURT:
+        return Decimal(settings.default_discount_b)
+    if scenario == Scenario.NEGOTIATION:
+        return Decimal(settings.default_discount_c)
+    return Decimal(settings.default_discount_d)
+
+
 @dataclass
 class ScoreInput:
     """Входные данные для скоринга одного лота."""
@@ -117,6 +149,8 @@ class ScoreInput:
     lot_id: int
     start_price: Decimal | None = None
     current_price: Decimal | None = None
+    # False when a schedule is known but there is no active price interval.
+    current_price_confirmed: bool = True
     cutoff_price: Decimal | None = None
     nominal_claimed: Decimal | None = None
     is_bundle: bool = False
@@ -177,6 +211,8 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     current_price = _d(inp.current_price) or _d(inp.start_price, Decimal(0))
     cutoff = _d(inp.cutoff_price, Decimal(0))
 
+    if not inp.current_price_confirmed:
+        stop_factors.append(StopFactor.CURRENT_PRICE_UNAVAILABLE)
     if current_price == 0:
         stop_factors.append(StopFactor.NO_SOURCE_OF_FUNDS)
 
@@ -199,10 +235,10 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             stop_factors.append(StopFactor.DEBTOR_UNVERIFIED)
 
         if debtor.fssp_uncollectible:
-            gaps.append(Gap.FSSP_MISSING)  # данные устарели
+            gaps.append(Gap.FSSP_UNCOLLECTIBLE)
 
         if debtor.kad_bankruptcy_open:
-            gaps.append(Gap.KAD_MISSING)
+            gaps.append(Gap.KAD_BANKRUPTCY_OPEN)
 
     # ── 3. Требования ────────────────────────────────────────────────────────
     total_principal = Decimal(0)
@@ -283,19 +319,7 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
     else:
         scenario = Scenario.NEGOTIATION
 
-    # ── 6. Стоимость взыскания ───────────────────────────────────────────────
-    if scenario == Scenario.ENFORCEMENT:
-        cost = Decimal(settings.cost_enforcement_rub)
-    elif scenario == Scenario.COURT:
-        cost = Decimal(settings.cost_court_rub)
-    elif scenario == Scenario.NEGOTIATION:
-        cost = Decimal(settings.cost_court_rub) * Decimal("0.5")
-    elif scenario == Scenario.SUBSIDIARY:
-        cost = Decimal(settings.cost_bankruptcy_rub)
-    else:
-        cost = Decimal(settings.cost_enforcement_rub)
-
-    # ── 7. Время и успех ────────────────────────────────────────────────────
+    # ── 6. Время и успех ────────────────────────────────────────────────────
     med_months, pessim_months = estimate_recovery_time(
         best_claim_has_judgment,
         best_claim_has_writ,
@@ -369,29 +393,87 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
         base = Decimal(0)
         gaps.append(Gap.NOMINAL_MISSING)
 
-    # ── 9. Дисконт по сценарию ───────────────────────────────────────────────
-    if scenario == Scenario.ENFORCEMENT:
-        discount = Decimal(settings.default_discount_a)
-    elif scenario == Scenario.COURT:
-        discount = Decimal(settings.default_discount_b)
-    elif scenario == Scenario.NEGOTIATION:
-        discount = Decimal(settings.default_discount_c)
+    # ── 9. EV ───────────────────────────────────────────────────────────────
+    # A bundle can contain claims with different evidence. Apply each claim's
+    # discount, recovery time and cost before aggregating; using the strongest
+    # representative claim for the whole bundle overstates EV.
+    if total_principal > 0 and inp.claims:
+        recovered = Decimal(0)
+        recovered_low = Decimal(0)
+        recovered_high = Decimal(0)
+        weighted_months = Decimal(0)
+        weighted_pessimistic_months = Decimal(0)
+        weighted_cost = Decimal(0)
+        for claim in inp.claims:
+            principal = _d(claim.principal)
+            if principal <= 0:
+                continue
+            claim_scenario = _scenario_for_claim(claim, inp.scenario_override)
+            claim_success = compute_success_rate(
+                bool(claim.has_judgment),
+                bool(claim.has_writ),
+                bool(claim.enforcement_alive),
+                claim.kind.value,
+                bool(claim.secured),
+                bool(claim.counterclaim_risk),
+                debtor.cash if debtor else None,
+                debtor.equity if debtor else None,
+                bool(debtor.fssp_uncollectible) if debtor else False,
+                bool(debtor.kad_bankruptcy_open) if debtor else False,
+            )
+            claim_months, claim_pessimistic_months = estimate_recovery_time(
+                bool(claim.has_judgment),
+                bool(claim.has_writ),
+                bool(claim.enforcement_alive),
+                claim.limitations_deadline,
+                claim.il_present_deadline,
+            )
+            if claim_months == 999:
+                if StopFactor.LIMITATIONS_EXPIRED not in stop_factors:
+                    stop_factors.append(StopFactor.LIMITATIONS_EXPIRED)
+                return ScoreResult(
+                    lot_id=inp.lot_id,
+                    score_class=LotClass.D,
+                    ev=Decimal(0),
+                    ev_low=Decimal(0),
+                    ev_high=Decimal(0),
+                    max_bid=Decimal(0),
+                    scenario=scenario,
+                    stop_factors=stop_factors,
+                    gaps=gaps,
+                )
+            discount = _discount_for_scenario(claim_scenario, settings)
+            recovered += principal * discount * claim_success
+            recovered_low += principal * Decimal("0.3") * claim_success
+            recovered_high += principal * discount * min(
+                Decimal("1.0"), claim_success + Decimal("0.1")
+            )
+            weighted_months += principal * Decimal(claim_months)
+            weighted_pessimistic_months += principal * Decimal(claim_pessimistic_months)
+            weighted_cost += principal * _cost_for_scenario(claim_scenario, settings)
+        cost = weighted_cost / total_principal
+        med_months_decimal = weighted_months / total_principal
+        pessimistic_months_decimal = weighted_pessimistic_months / total_principal
     else:
-        discount = Decimal(settings.default_discount_d)
+        discount = _discount_for_scenario(scenario, settings)
+        cost = _cost_for_scenario(scenario, settings)
+        recovered = base * discount * success_rate
+        recovered_low = base * Decimal("0.3") * success_rate
+        recovered_high = base * discount * min(
+            Decimal("1.0"), success_rate + Decimal("0.1")
+        )
+        med_months_decimal = Decimal(med_months)
+        pessimistic_months_decimal = Decimal(pessim_months)
 
-    # ── 10. EV ───────────────────────────────────────────────────────────────
     purchase_price = current_price
     annual_rate = _d(settings.alternative_rate)
-    time_cost = purchase_price * annual_rate * Decimal(med_months) / Decimal(12)
-    pessimistic_time_cost = purchase_price * annual_rate * Decimal(pessim_months) / Decimal(12)
-    ev_optimistic = base * discount * success_rate - purchase_price - cost - time_cost
-    ev_low_raw = base * Decimal("0.3") * success_rate - purchase_price - cost - pessimistic_time_cost
-    ev_high_raw = (
-        base * discount * min(Decimal("1.0"), success_rate + Decimal("0.1"))
-        - purchase_price
-        - cost
-        - time_cost
+    time_cost = purchase_price * annual_rate * med_months_decimal / Decimal(12)
+    pessimistic_time_cost = (
+        purchase_price * annual_rate * pessimistic_months_decimal / Decimal(12)
     )
+    ev_optimistic = recovered - purchase_price - cost - time_cost
+    ev_low_raw = recovered_low - purchase_price - cost - pessimistic_time_cost
+    ev_high_raw = recovered_high - purchase_price - cost - time_cost
 
     ev_optimistic = ev_optimistic.quantize(Decimal("1"), ROUND_HALF_UP)
     ev_low = ev_low_raw.quantize(Decimal("1"), ROUND_HALF_UP)

@@ -1,6 +1,6 @@
 [project]
 name = "ar-radar"
-version = "0.1.0"
+version = "0.3.0"
 description = "Bankrupt AR Radar — радар дебиторской задолженности"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,6 +30,8 @@ dependencies = [
     "aiogram>=3.13.0",
     "pypdf>=5.0.0",
     "python-docx>=1.1.0",
+    "openai>=1.0.0",
+    "playwright>=1.49.0",
 ]
 
 [project.optional-dependencies]

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -22,7 +23,7 @@ router = APIRouter(dependencies=[Depends(require_api_access)])
 # (имя, URL, считать ли критичным для работы радара)
 SOURCES: list[tuple[str, str, bool]] = [
     ("efrsb", "https://bankrot.fedresurs.ru", True),
-    ("fedresurb", "https://fedresurs.ru", False),
+    ("fedresurs", "https://fedresurs.ru", False),
     ("egrul", "https://egrul.nalog.ru", True),
     ("bo_nalog", "https://bo.nalog.ru", True),
     ("pb_nalog", "https://pb.nalog.ru", False),
@@ -74,9 +75,9 @@ async def check_sources() -> dict:
         headers={"User-Agent": "AR-Radar/1.0"},
         verify=True,
     ) as client:
-        results = []
-        for name, url, critical in SOURCES:
-            results.append(await _check(client, name, url, critical))
+        results = await asyncio.gather(
+            *(_check(client, name, url, critical) for name, url, critical in SOURCES)
+        )
 
     blocked = [r["source"] for r in results if r["critical"] and not r["ok"]]
     return {

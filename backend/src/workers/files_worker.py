@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
@@ -20,9 +20,26 @@ from src.connectors.files import (
 from src.connectors.llm import extract_facts_with_llm
 from src.database import async_session_factory
 from src.models.entities import Claim, Document
+from src.models.enums import DocumentProcessingStatus
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def defer_download_retry(doc: Document, error: Exception, now: datetime | None = None) -> None:
+    """Record a bounded exponential retry delay after a transient download error."""
+    attempts = int(doc.download_attempts or 0) + 1
+    retry_after_minutes = min(15 * (2 ** min(attempts - 1, 7)), 24 * 60)
+    reference = now or datetime.now(UTC)
+    doc.download_attempts = attempts
+    doc.last_error = f"{type(error).__name__}: {error}"[:500]
+    max_attempts = max(1, int(getattr(settings, "document_max_attempts", 8)))
+    if attempts >= max_attempts:
+        doc.processing_status = DocumentProcessingStatus.NEEDS_REVIEW.value
+        doc.next_retry_at = None
+        return
+    doc.processing_status = DocumentProcessingStatus.RETRYING.value
+    doc.next_retry_at = reference + timedelta(minutes=retry_after_minutes)
 
 
 class EfrsbDocumentAdapter(EtpAdapter):
@@ -78,13 +95,25 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
     adapter_cls = adapter_for_document_url(doc.url)
     if adapter_cls is None:
         logger.warning("Unsupported document host for %s", doc.url)
-        return None
+        doc.extracted_facts = {
+            "facts": {},
+            "source": "unsupported_host",
+            "status": "needs_review",
+        }
+        doc.processing_status = DocumentProcessingStatus.NEEDS_REVIEW.value
+        return doc.extracted_facts
     try:
         async with adapter_cls() as adapter:
             data = await adapter.download_file(etp_file)
     except Exception as e:
         logger.exception("Failed to download %s: %s", doc.url, e)
+        defer_download_retry(doc, e)
         return None
+
+    doc.download_attempts = 0
+    doc.next_retry_at = None
+    doc.last_error = None
+    doc.processing_status = DocumentProcessingStatus.PENDING.value
 
     # Хэш
     doc.sha256 = sha256_hex(data)
@@ -98,6 +127,7 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
             "source": "unsupported_legacy_doc",
             "status": "needs_review",
         }
+        doc.processing_status = DocumentProcessingStatus.NEEDS_REVIEW.value
         doc.downloaded_at = None
         return doc.extracted_facts
     content_type = (
@@ -117,6 +147,7 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
             "source": "parse_failed",
             "status": "needs_review",
         }
+        doc.processing_status = DocumentProcessingStatus.NEEDS_REVIEW.value
         # Не помечаем повреждённый/неподдерживаемый файл как обработанный:
         # очередь сможет повторить попытку после исправления адаптера.
         doc.downloaded_at = None
@@ -134,6 +165,7 @@ async def process_file(doc: Document, lot_id: int, session) -> dict | None:
         doc.extracted_facts = {"facts": extract_facts_from_text(text), "source": "regex"}
     if text.strip():
         doc.downloaded_at = datetime.now(UTC)
+        doc.processing_status = DocumentProcessingStatus.COMPLETED.value
 
     claim = (
         await session.execute(
@@ -159,11 +191,28 @@ async def run_files(batch_size: int = 20) -> int:
     logger.info("files: starting")
 
     async with async_session_factory() as session:
+        now = datetime.now(UTC)
         # Лоты, у которых есть URL'ы файлов, но нет downloaded_at
         stmt = (
             select(Document)
             .where(Document.url.isnot(None))
             .where(Document.downloaded_at.is_(None))
+            .where(
+                Document.processing_status.in_(
+                    [
+                        DocumentProcessingStatus.PENDING.value,
+                        DocumentProcessingStatus.RETRYING.value,
+                    ]
+                )
+            )
+            .where(
+                or_(
+                    Document.next_retry_at.is_(None),
+                    Document.next_retry_at <= now,
+                )
+            )
+            .order_by(Document.next_retry_at.asc().nulls_first(), Document.id.asc())
+            .with_for_update(skip_locked=True)
             .limit(batch_size)
         )
         result = await session.execute(stmt)
@@ -176,7 +225,9 @@ async def run_files(batch_size: int = 20) -> int:
                 if facts and facts.get("status") != "needs_review":
                     count += 1
                 await session.commit()
-                logger.info("files: doc %d processed", doc.id)
+                logger.info(
+                    "files: doc %d status=%s", doc.id, doc.processing_status
+                )
             except Exception:
                 logger.exception("files: doc %d failed", doc.id)
                 await session.rollback()
