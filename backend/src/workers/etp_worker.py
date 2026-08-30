@@ -59,7 +59,6 @@ async def run_etp_refresh(batch_size: int = 50) -> int:
             .where(or_(Lot.etp_next_retry_at.is_(None), Lot.etp_next_retry_at <= now))
             .options(selectinload(Lot.trade))
             .order_by(Lot.etp_next_retry_at.asc().nulls_first(), Lot.id.asc())
-            .with_for_update(skip_locked=True)
             .limit(batch_size)
         )
         lots = result.scalars().all()

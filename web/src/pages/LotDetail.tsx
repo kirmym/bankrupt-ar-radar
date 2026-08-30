@@ -8,6 +8,9 @@ export default function LotDetail() {
   const [lot, setLot] = useState<Lot | null>(null);
   const [loading, setLoading] = useState(true);
   const [feedbackNote, setFeedbackNote] = useState("");
+  const [debtorInn, setDebtorInn] = useState("");
+  const [debtorName, setDebtorName] = useState("");
+  const [savingDebtor, setSavingDebtor] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -24,6 +27,35 @@ export default function LotDetail() {
 
   const cls = lot.score_class || "D";
   const claims = lot.claims ?? [];
+  const currentDebtor = claims[0]?.debtor_party;
+
+  const saveDebtor = async () => {
+    if (!id || !/^\d{10}(\d{2})?$/.test(debtorInn.trim())) {
+      alert("Введите ИНН из 10 или 12 цифр");
+      return;
+    }
+    setSavingDebtor(true);
+    try {
+      const response = await lotsApi.assignDebtor(parseInt(id, 10), {
+        inn: debtorInn.trim(),
+        name: debtorName.trim() || undefined,
+      });
+      setLot(response.data);
+      setDebtorInn("");
+      setDebtorName("");
+    } catch (error) {
+      if ((error as { response?: { status?: number } }).response?.status === 401) {
+        const key = window.prompt("Введите API-ключ AR Radar");
+        if (key?.trim()) {
+          window.sessionStorage.setItem("ar_radar_api_key", key.trim());
+          return saveDebtor();
+        }
+      }
+      alert("Не удалось сохранить дебитора");
+    } finally {
+      setSavingDebtor(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -82,6 +114,37 @@ export default function LotDetail() {
           <ClaimCard claim={claim} />
         </section>
       ))}
+
+      <section className="bg-white p-4 rounded shadow-sm border border-slate-200">
+        <h3 className="font-semibold text-slate-900">Дебитор не найден автоматически?</h3>
+        <p className="text-sm text-slate-500 mt-1">
+          Укажите ИНН вручную. Это пометит лот для обогащения и нового скоринга.
+          {currentDebtor?.inn ? ` Сейчас: ${currentDebtor.inn}.` : ""}
+        </p>
+        <div className="mt-3 flex gap-2 flex-wrap">
+          <input
+            className="px-3 py-1.5 border border-slate-300 rounded text-sm"
+            placeholder="ИНН"
+            inputMode="numeric"
+            value={debtorInn}
+            onChange={(event) => setDebtorInn(event.target.value.replace(/\D/g, "").slice(0, 12))}
+          />
+          <input
+            className="px-3 py-1.5 border border-slate-300 rounded text-sm flex-1 min-w-56"
+            placeholder="Название (необязательно)"
+            value={debtorName}
+            onChange={(event) => setDebtorName(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={savingDebtor}
+            onClick={saveDebtor}
+            className="px-3 py-1.5 bg-slate-900 text-white rounded text-sm disabled:opacity-50"
+          >
+            {savingDebtor ? "Сохранение…" : "Сохранить ИНН"}
+          </button>
+        </div>
+      </section>
 
       {lot.score_stop_factors?.length > 0 && (
         <div className="bg-red-50 border border-red-200 rounded p-4">

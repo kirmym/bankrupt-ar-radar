@@ -52,7 +52,7 @@ async def run_async_migrations() -> None:
         # A rolling deployment can start more than one container.  The
         # session-level lock serializes schema upgrades without relying on the
         # deployment platform to provide a release phase.
-        lock_key = int(settings.worker_leader_lock_key)
+        lock_key = int(settings.migration_lock_key)
         await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": lock_key})
         try:
             await connection.run_sync(do_run_migrations)

@@ -34,7 +34,8 @@ async def run_retention() -> dict[str, int]:
         )
         alert_result = await session.execute(
             delete(AlertState).where(
-                AlertState.alerted_at < alert_cutoff,
+                AlertState.sent_at.is_not(None),
+                AlertState.sent_at < alert_cutoff,
                 AlertState.status == AlertDeliveryStatus.SENT.value,
             )
         )

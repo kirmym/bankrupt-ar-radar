@@ -31,6 +31,9 @@ class ApiLot(BaseModel):
     score_scenario: str | None = None
     nominal_claimed: Decimal | None = None
     current_interval_to: str | None = None
+    price_schedule_status: str | None = None
+    price_observed_at: str | None = None
+    score_updated_at: str | None = None
     score_stop_factors: list[str] = Field(default_factory=list)
 
 
@@ -72,14 +75,27 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
         for score_class in ("A", "B"):
             resp = await client.get(
                 f"{base_url.rstrip('/')}/api/v1/lots",
-                params={"page": 1, "page_size": limit, "min_ev": 0, "score_class": score_class},
+                params={
+                    "page": 1,
+                    "page_size": limit,
+                    "min_ev": 0,
+                    "score_class": score_class,
+                    "price_status": "parsed",
+                    "trade_status": "in_progress",
+                },
                 headers=headers,
             )
             resp.raise_for_status()
             payload = ApiLotList.model_validate(resp.json())
             lots.extend(item.model_dump(mode="json") for item in payload.items)
+        active = [
+            lot
+            for lot in lots
+            if lot.get("price_schedule_status") == "parsed"
+            and lot.get("current_price") is not None
+        ]
         return sorted(
-            lots,
+            active,
             key=lambda lot: Decimal(str(lot.get("score_ev") or 0)),
             reverse=True,
         )[:limit]

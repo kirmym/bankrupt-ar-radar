@@ -58,8 +58,7 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
         current_price=lot.current_price,
         current_price_confirmed=(
             lot.current_price is not None
-            and lot.price_schedule_status
-            not in {PriceScheduleStatus.UNPARSED.value, PriceScheduleStatus.EXPIRED.value}
+            and lot.price_schedule_status == PriceScheduleStatus.PARSED.value
         ),
         cutoff_price=lot.cutoff_price,
         nominal_claimed=lot.nominal_claimed,
@@ -117,11 +116,19 @@ async def run_rescore() -> int:
     logger.info("score: starting")
 
     async with async_session_factory() as session:
-        stmt = select(Lot.id).where(Lot.is_receivable == True)  # noqa: E712
+        stmt = (
+            select(Lot.id)
+            .where(Lot.is_receivable == True)  # noqa: E712
+            .where(
+                (Lot.score_updated_at.is_(None))
+                | (Lot.score_updated_at < Lot.updated_at)
+            )
+        )
         result = await session.execute(stmt)
         lot_ids = result.scalars().all()
 
         count = 0
+        failures = 0
         for lot_id in lot_ids:
             try:
                 snap = await score_lot(lot_id, session)
@@ -130,6 +137,10 @@ async def run_rescore() -> int:
             except Exception:
                 logger.exception("score: failed for lot %d", lot_id)
                 await session.rollback()
+                failures += 1
+
+        if lot_ids and failures == len(lot_ids):
+            raise RuntimeError("score: all selected lots failed")
 
         logger.info("score: %d lots scored", count)
         return count

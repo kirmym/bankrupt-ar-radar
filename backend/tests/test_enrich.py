@@ -104,12 +104,32 @@ async def test_egrul_public_search_row_sets_identity_without_guessing_status(
         return [{"i": "7707083893", "n": "ООО Ромашка", "o": "1027700132195"}]
 
     monkeypatch.setattr(enrich, "_fetch_egrul_rows", rows)
+    async def no_html(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(enrich, "_fetch_html", no_html)
     party = Party(role=PartyRole.DEBTOR.value, inn="7707083893")
 
     assert await enrich.enrich_from_egrul(party, None) is True
     assert party.name == "ООО Ромашка"
     assert party.ogrn == "1027700132195"
     assert party.status is None
+
+
+@pytest.mark.asyncio
+async def test_egrul_public_search_row_applies_status_when_source_supplies_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.connectors import enrich
+
+    async def rows(_inn: str) -> list[dict[str, object]]:
+        return [{"i": "7707083893", "n": "ООО Ромашка", "o": "1027700132195", "s": "Действующая"}]
+
+    monkeypatch.setattr(enrich, "_fetch_egrul_rows", rows)
+    party = Party(role=PartyRole.DEBTOR.value, inn="7707083893")
+
+    assert await enrich.enrich_from_egrul(party, None) is True
+    assert party.status == "active"
 
 
 @pytest.mark.asyncio

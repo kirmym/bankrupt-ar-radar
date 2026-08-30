@@ -212,7 +212,6 @@ async def run_files(batch_size: int = 20) -> int:
                 )
             )
             .order_by(Document.next_retry_at.asc().nulls_first(), Document.id.asc())
-            .with_for_update(skip_locked=True)
             .limit(batch_size)
         )
         result = await session.execute(stmt)
@@ -228,9 +227,13 @@ async def run_files(batch_size: int = 20) -> int:
                 logger.info(
                     "files: doc %d status=%s", doc.id, doc.processing_status
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("files: doc %d failed", doc.id)
                 await session.rollback()
+                retry_doc = await session.get(Document, doc.id)
+                if retry_doc is not None:
+                    defer_download_retry(retry_doc, exc)
+                    await session.commit()
 
         logger.info("files: %d documents processed", count)
         return count

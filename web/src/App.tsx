@@ -21,7 +21,7 @@ export default function App() {
               </Link>
             </nav>
           </div>
-          <div className="text-xs text-slate-500">v0.1.0 · источник: ЕФРСБ</div>
+          <div className="text-xs text-slate-500">v0.3.0 · источник: ЕФРСБ</div>
         </div>
       </header>
       <main className="max-w-7xl mx-auto px-4 py-6">

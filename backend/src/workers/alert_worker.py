@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
 from src.database import async_session_factory
@@ -26,7 +27,13 @@ def alert_dedupe_key(lot: Lot, chat_id: str, dedupe_hours: int, now: datetime) -
     window_seconds = max(1, dedupe_hours * 60 * 60)
     bucket = int(now.timestamp()) // window_seconds
     version = lot.score_version or "unversioned"
-    return f"lot:{lot.id}:chat:{chat_id}:score:{version}:window:{bucket}"
+    revision = lot.score_updated_at.isoformat() if lot.score_updated_at else "unscored"
+    price = str(lot.current_price) if lot.current_price is not None else "none"
+    deadline = lot.current_interval_to.isoformat() if lot.current_interval_to else "none"
+    return (
+        f"lot:{lot.id}:chat:{chat_id}:score:{version}:{revision}:"
+        f"price:{price}:deadline:{deadline}:window:{bucket}"
+    )
 
 
 async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: int) -> int | None:
@@ -99,7 +106,7 @@ def build_alert_candidates_stmt(now: datetime, limit: int, price_freshness_hours
         .where(Lot.current_price.is_not(None))
         .where(
             Lot.price_schedule_status.in_(
-                [PriceScheduleStatus.PARSED.value, PriceScheduleStatus.NOT_PRESENT.value]
+                [PriceScheduleStatus.PARSED.value]
             )
         )
         .where(Lot.price_observed_at.is_not(None))
@@ -160,6 +167,9 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
             limit,
             price_freshness_hours=max(1, int(getattr(settings, "price_freshness_hours", 24))),
         )
+        stmt = stmt.options(
+            selectinload(Lot.trade)
+        )
         result = await session.execute(stmt)
         lots = result.scalars().all()
 
@@ -191,8 +201,9 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     "nominal_claimed": lot.nominal_claimed,
                     "current_interval_to": lot.current_interval_to,
                     "score_stop_factors": lot.score_stop_factors,
-                    # Имена и ИНН не отправляем во внешний Telegram API.
+                    # Не отправляем имя/ИНН должника во внешний Telegram API.
                     "claims": [],
+                    "efrsb_url": lot.trade.efrsb_url if lot.trade else None,
                 }
             )
             for chat_id in settings.telegram_chat_ids_list:

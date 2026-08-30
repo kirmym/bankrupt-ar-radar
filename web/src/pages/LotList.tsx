@@ -8,6 +8,9 @@ export default function LotList() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "A" | "B" | "C" | "D">("all");
   const [search, setSearch] = useState("");
+  const [etpName, setEtpName] = useState("");
+  const [hasDebtor, setHasDebtor] = useState<"all" | "yes" | "no">("all");
+  const [hasCourt, setHasCourt] = useState<"all" | "yes" | "no">("all");
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [total, setTotal] = useState(0);
@@ -19,6 +22,10 @@ export default function LotList() {
     const params: Record<string, unknown> = { page, page_size: 20 };
     if (filter !== "all") params.score_class = filter;
     if (search.trim()) params.search = search.trim();
+    if (etpName.trim()) params.etp_name = etpName.trim();
+    if (hasDebtor !== "all") params.has_debtor = hasDebtor === "yes";
+    if (hasCourt !== "all") params.has_court = hasCourt === "yes";
+    params.price_status = "parsed";
     lotsApi
       .list(params)
       .then((r) => {
@@ -33,7 +40,7 @@ export default function LotList() {
         setError(e instanceof Error ? e.message : "Не удалось загрузить лоты");
       })
       .finally(() => setLoading(false));
-  }, [filter, page, search]);
+  }, [filter, page, search, etpName, hasDebtor, hasCourt]);
 
   const changeFilter = (next: typeof filter) => {
     setFilter(next);
@@ -60,6 +67,40 @@ export default function LotList() {
             setPage(1);
           }}
         />
+        <input
+          type="text"
+          placeholder="ЭТП"
+          className="px-3 py-1.5 border border-slate-300 rounded text-sm w-40"
+          value={etpName}
+          onChange={(e) => {
+            setEtpName(e.target.value);
+            setPage(1);
+          }}
+        />
+        <select
+          className="px-3 py-1.5 border border-slate-300 rounded text-sm"
+          value={hasDebtor}
+          onChange={(e) => {
+            setHasDebtor(e.target.value as typeof hasDebtor);
+            setPage(1);
+          }}
+        >
+          <option value="all">Дебитор: любой</option>
+          <option value="yes">Дебитор найден</option>
+          <option value="no">Без дебитора</option>
+        </select>
+        <select
+          className="px-3 py-1.5 border border-slate-300 rounded text-sm"
+          value={hasCourt}
+          onChange={(e) => {
+            setHasCourt(e.target.value as typeof hasCourt);
+            setPage(1);
+          }}
+        >
+          <option value="all">Суд: любой</option>
+          <option value="yes">Есть суд</option>
+          <option value="no">Без суда</option>
+        </select>
         <div className="flex gap-1">
           {(["all", "A", "B", "C", "D"] as const).map((c) => (
             <button

@@ -58,21 +58,17 @@ async def _ingest_once(startup_gate: asyncio.Event | None = None) -> None:
 async def _enrich_once(ready_gate: asyncio.Event | None = None) -> None:
     from src.workers.enrich_worker import run_enrich
 
-    try:
-        await run_enrich()
-    finally:
-        if ready_gate is not None:
-            ready_gate.set()
+    await run_enrich()
+    if ready_gate is not None:
+        ready_gate.set()
 
 
 async def _score_once(ready_gate: asyncio.Event | None = None) -> None:
     from src.workers.score_worker import run_rescore
 
-    try:
-        await run_rescore()
-    finally:
-        if ready_gate is not None:
-            ready_gate.set()
+    await run_rescore()
+    if ready_gate is not None:
+        ready_gate.set()
 
 
 async def _files_once() -> None:

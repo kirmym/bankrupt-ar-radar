@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # advisory lock guarantees that only one instance becomes the leader.
     enable_workers: bool = True
     worker_leader_lock_key: int = 842_917_331
+    migration_lock_key: int = 842_917_332
     # Веб-статика (собранный Vite dist), раздаваемая FastAPI
     web_dist_dir: str = ""
 

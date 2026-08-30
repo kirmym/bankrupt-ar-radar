@@ -56,7 +56,6 @@ async def run_enrich(batch_size: int = 50) -> int:
                 Party.source_as_of.asc().nulls_first(),
                 Party.id.asc(),
             )
-            .with_for_update(skip_locked=True)
             .limit(batch_size)
         )
         result = await session.execute(stmt)
@@ -69,23 +68,28 @@ async def run_enrich(batch_size: int = 50) -> int:
             attempt_at = datetime.now(UTC)
             try:
                 statuses = await enrich_party(debtor, session)
+                if any(statuses.values()):
+                    # Network calls happen outside a row lock.  Once a source
+                    # returns, invalidate linked scores even when EGRUL itself
+                    # needs a retry; FSSP/KAD are score inputs too.
+                    await session.execute(
+                        update(Lot)
+                        .where(Lot.claims.any(Claim.debtor_party_id == debtor.id))
+                        .values(updated_at=attempt_at)
+                    )
                 # One timestamp is used by scoring as the identity/status
                 # verification timestamp. FSSP/KAD results must not make a
                 # stale EGRUL status look fresh.
-                if statuses.get("egrul", False):
+                egrul_verified = bool(statuses.get("egrul", False)) and (
+                    debtor.status is not None or len(debtor.inn or "") == 12
+                )
+                if egrul_verified:
                     updated_at = attempt_at
                     debtor.source_as_of = updated_at
                     debtor.enrich_attempted_at = updated_at
                     debtor.enrich_next_retry_at = None
                     debtor.enrich_failures = 0
                     debtor.enrich_last_error = None
-                    # Party changes are score inputs.  Touch linked lots so
-                    # alerts wait for a rescore instead of sending old EVs.
-                    await session.execute(
-                        update(Lot)
-                        .where(Lot.claims.any(Claim.debtor_party_id == debtor.id))
-                        .values(updated_at=updated_at)
-                    )
                     await session.commit()
                     logger.info("enrich: %s done (%s)", debtor.inn, statuses)
                     succeeded += 1
@@ -121,6 +125,8 @@ async def run_enrich(batch_size: int = 50) -> int:
         logger.info(
             "enrich: selected=%d succeeded=%d deferred=%d", len(debtors), succeeded, failed
         )
+        if debtors and failed == len(debtors):
+            raise RuntimeError("enrich: all selected debtors failed")
         return succeeded
 
 

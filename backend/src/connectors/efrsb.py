@@ -99,6 +99,11 @@ def _valid_inn(inn: str) -> bool:
     return False
 
 
+def is_valid_inn(inn: str) -> bool:
+    """Public validation helper shared by manual/API debtor assignment."""
+    return _valid_inn(inn)
+
+
 def extract_ogrn(text: str) -> list[str]:
     return list(dict.fromkeys(OGRN_RE.findall(text)))
 
@@ -164,10 +169,16 @@ def extract_debtor_inn(
 
 
 def _source_timezone(value: str) -> timezone:
-    """Return the timezone explicitly indicated by a source cell."""
+    """Return the source timezone.
+
+    EFRSB is a Russian public register and its date cells usually omit the
+    timezone marker.  Treating an unqualified value as UTC shifts auction
+    deadlines by three hours in Moscow deployments, so Moscow is the safe
+    default; an explicit marker still wins.
+    """
     if re.search(r"\b(?:мск|московск)", value, re.IGNORECASE):
         return timezone(timedelta(hours=3))
-    return UTC
+    return timezone(timedelta(hours=3))
 
 
 def _parse_datetime_match(match: re.Match[str], source_timezone: timezone) -> datetime | None:
@@ -393,7 +404,10 @@ async def fetch_page(url: str, timeout: float = 30.0) -> str:
         for redirect_count in range(4):
             if urlparse(current).netloc != urlparse(source_url).netloc:
                 raise SourceAccessError("source redirect leaves configured host")
-            resp = await client.get(current, headers={"User-Agent": "AR-Radar/1.0"})
+            try:
+                resp = await client.get(current, headers={"User-Agent": "AR-Radar/1.0"})
+            except httpx.RequestError:
+                return await _fetch_via_cloakbrowser(current, timeout)
             if 300 <= resp.status_code < 400:
                 location = resp.headers.get("location")
                 if not location or redirect_count == 3:
@@ -431,7 +445,16 @@ async def search_public_offers(
         for redirect_count in range(4):
             if urlparse(current).netloc != urlparse(get_settings().efrsb_public_url).netloc:
                 raise SourceAccessError("source redirect leaves configured host")
-            resp = await active_client.get(current, params=params if redirect_count == 0 else None)
+            try:
+                resp = await active_client.get(
+                    current,
+                    params=params if redirect_count == 0 else None,
+                )
+            except httpx.RequestError as exc:
+                access_error = SourceAccessError(
+                    f"source request failed: {type(exc).__name__}"
+                )
+                break
             if 300 <= resp.status_code < 400:
                 location = resp.headers.get("location")
                 if not location or redirect_count == 3:
@@ -470,11 +493,32 @@ async def search_public_offers(
     tree = HTMLParser(response_text)
     items: list[dict] = []
 
-    rows = tree.css(".lot-row, .publication-item, .offer-item")
-    if not rows and not any(
-        marker in response_text.lower() for marker in ("лот", "торг", "публичн")
-    ):
-        raise SourceParseError("public offer rows were not found")
+    rows = tree.css(".lot-row, .publication-item, .offer-item, [data-lot-id], [data-publication-id]")
+    if not rows:
+        # A markup change often preserves the lot link while removing the
+        # wrapper class.  Recover the nearest structural parent so a selector
+        # rename does not silently turn a successful import into an empty run.
+        anchors = tree.css("a[href*='/lot/'], a[href*='/publication/'], a[href*='/offer/']")
+        recovered = []
+        recovered_ids: set[int] = set()
+        for anchor in anchors:
+            parent = anchor.parent
+            for _ in range(4):
+                if parent is None:
+                    break
+                if parent.css("a[href]"):
+                    marker = id(parent)
+                    if marker not in recovered_ids:
+                        recovered.append(parent)
+                        recovered_ids.add(marker)
+                    break
+                parent = parent.parent
+        rows = recovered
+    if not rows:
+        lowered_response = response_text.lower()
+        if any(marker in lowered_response for marker in ("ничего не найдено", "по вашему запросу ничего", "результатов нет")):
+            return []
+        raise SourceParseError("public offer rows were not found; source markup may have changed")
 
     for row in rows:
         link_el = row.css_first("a[href*='/lot/'], a[href*='/publication/']")

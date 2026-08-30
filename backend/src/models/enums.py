@@ -109,6 +109,7 @@ class PriceScheduleStatus(StrEnum):
     UNKNOWN = "unknown"
     PARSED = "parsed"
     NOT_PRESENT = "not_present"
+    NOT_STARTED = "not_started"
     UNPARSED = "unparsed"
     EXPIRED = "expired"
     STALE = "stale"

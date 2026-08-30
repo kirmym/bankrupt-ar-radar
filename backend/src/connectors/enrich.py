@@ -68,8 +68,23 @@ async def _fetch_egrul_rows(inn: str) -> list[dict[str, object]] | None:
     return None
 
 
+def _egrul_status(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    if "ликвид" in lowered:
+        return "liquidation"
+    if "исключ" in lowered:
+        return "excluded"
+    if "банкрот" in lowered:
+        return "bankruptcy"
+    if any(marker in lowered for marker in ("действующ", "действует", "зарегистрировано")):
+        return "active"
+    return None
+
+
 def _apply_egrul_row(party: Party, row: dict[str, object]) -> bool:
-    """Apply a validated FNS search row without inferring a legal status."""
+    """Apply a validated FNS search row, including status when supplied."""
     name = row.get("n")
     ogrn = row.get("o")
     parsed_name = name.strip() if isinstance(name, str) else ""
@@ -80,6 +95,11 @@ def _apply_egrul_row(party: Party, row: dict[str, object]) -> bool:
         party.name = parsed_name
     if parsed_ogrn and not party.ogrn:
         party.ogrn = parsed_ogrn
+    for key in ("s", "status", "state", "c", "r"):
+        parsed_status = _egrul_status(row.get(key))
+        if parsed_status:
+            party.status = parsed_status
+            break
     party.source_as_of = datetime.now(UTC)
     return True
 
@@ -154,12 +174,14 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
     url = f"https://egrul.nalog.ru/index.html?query={quote_plus(inn)}"
 
     try:
+        row_applied = False
         rows = await _fetch_egrul_rows(inn)
         if rows:
             exact_row = next(
                 (row for row in rows if str(row.get("i", "")) == inn), rows[0]
             )
-            if _apply_egrul_row(party, exact_row):
+            row_applied = _apply_egrul_row(party, exact_row)
+            if row_applied and party.status is not None:
                 return True
 
         # The browser path is retained as the CAPTCHA fallback.  It also
@@ -167,7 +189,7 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
         # keeps a rendered public result card.
         html = await _fetch_html(url)
         if not html:
-            return False
+            return row_applied
         lowered = html.lower()
         tree = HTMLParser(html)
 
@@ -203,7 +225,7 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
             if ogrn_m and not party.ogrn:
                 party.ogrn = ogrn_m.group(1)
             party.source_as_of = datetime.now(UTC)
-        return success
+        return success or row_applied
     except Exception:
         logger.exception("egrul enrichment failed for %s", party.inn)
         return False
@@ -244,7 +266,10 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
         if not html:
             return False
         lowered = html.lower()
-        if "исполнительн" not in lowered and "производств не найдено" not in lowered:
+        if not re.search(r"производств(?:а)?\s+не\s+найден", lowered) and (
+            "исполнительн" not in lowered
+            or not re.search(r"(?:руб|₽|сумм|результат|найдено)", lowered)
+        ):
             return False
         sums = [_d(value) for value in re.findall(r"\d[\d\s\u00a0.,]*\s*(?:руб|₽)", html, re.IGNORECASE)]
         party.fssp_sum = sum(sums, Decimal(0))
@@ -263,7 +288,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
         return False
 
     try:
-        url = "https://kad.arbitr.ru/Kad/SearchCases"
+        url = "https://kad.arbitr.ru/Kad/SearchInstances"
         payload = {
             "Count": 5,
             "Page": 1,
@@ -293,7 +318,7 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
             )
             return True
 
-        html = await _fetch_html(f"https://kad.arbitr.ru/Kad/SearchCases?Sides={quote_plus(party.inn)}")
+        html = await _fetch_html(f"https://kad.arbitr.ru/Kad/SearchInstances?Sides={quote_plus(party.inn)}")
         if not html:
             return False
         lowered = html.lower()

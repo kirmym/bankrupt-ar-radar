@@ -116,13 +116,60 @@ async def test_public_offer_html_fixture_is_parsed(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_public_offer_challenge_is_not_an_empty_success() -> None:
+async def test_public_offer_challenge_is_not_an_empty_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Keep this regression test independent from a developer's local CDP
+    # profile: it verifies the HTTP challenge error when browser fallback is
+    # unavailable, rather than making a real browser request.
+    monkeypatch.setattr(
+        "src.connectors.efrsb.get_settings",
+        lambda: SimpleNamespace(
+            efrsb_public_url="https://bankrot.fedresurs.ru",
+            cloakbrowser_cdp_url="",
+        ),
+    )
+
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(SourceAccessError, match="status=403"):
             await search_public_offers(client=client)
+
+
+@pytest.mark.asyncio
+async def test_public_offer_transport_error_uses_cloakbrowser_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.connectors.efrsb.get_settings",
+        lambda: SimpleNamespace(
+            efrsb_public_url="https://bankrot.fedresurs.ru",
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=20,
+            cloakbrowser_wait_seconds=1,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    async def fallback(url: str, timeout: float) -> str:
+        assert "/publications/public/offer" in url
+        assert timeout == 20
+        return (
+            '<div class="offer-item">'
+            '<a href="/lot/42">Право требования</a>'
+            '<span class="price">12 345,67 руб.</span>'
+            "</div>"
+        )
+
+    monkeypatch.setattr("src.connectors.efrsb._fetch_via_cloakbrowser", fallback)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await search_public_offers(client=client)
+
+    assert result[0]["url"] == "https://bankrot.fedresurs.ru/lot/42"
 
 
 def test_extract_debtor_inn_prefers_role_context_and_exclusions():
@@ -150,8 +197,8 @@ def test_parse_price_intervals_marks_current_step():
     assert intervals[0]["price"] == Decimal("100000")
     assert intervals[0]["is_current"] is True
     assert intervals[1]["is_current"] is False
-    assert intervals[0]["starts_at"] == datetime(2026, 1, 1, tzinfo=UTC)
-    assert intervals[0]["ends_at"] == datetime(2026, 1, 3, tzinfo=UTC)
+    assert intervals[0]["starts_at"] == datetime(2025, 12, 31, 21, tzinfo=UTC)
+    assert intervals[0]["ends_at"] == datetime(2026, 1, 2, 21, tzinfo=UTC)
 
 
 def test_parse_price_intervals_has_no_current_step_outside_schedule():
@@ -171,6 +218,38 @@ def test_parse_price_intervals_does_not_use_sequence_as_price():
     </table>
     """
     assert parse_price_intervals(html, now=datetime(2026, 9, 1, tzinfo=UTC)) == []
+
+
+def test_public_offer_parser_rejects_generic_page_without_rows():
+    import asyncio
+    from types import SimpleNamespace
+
+    import src.connectors.efrsb as efrsb
+
+    class Response:
+        status_code = 200
+        text = "<html><body>Торги публичного предложения</body></html>"
+        url = "https://bankrot.fedresurs.ru/publications/public/offer"
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def get(self, *_args, **_kwargs):
+            return Response()
+
+    async def run():
+        from src.connectors.efrsb import SourceParseError, search_public_offers
+
+        old = efrsb.get_settings
+        efrsb.get_settings = lambda: SimpleNamespace(efrsb_public_url="https://bankrot.fedresurs.ru")
+        try:
+            with pytest.raises(SourceParseError):
+                await search_public_offers(client=Client())
+        finally:
+            efrsb.get_settings = old
+
+    asyncio.run(run())
 
 
 def test_parse_moscow_time_is_converted_to_utc():

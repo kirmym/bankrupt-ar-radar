@@ -192,6 +192,31 @@ def propose_fact_updates(
     facts = extracted.get("facts", extracted)
     claim_facts = facts.get("claim") or {}
     debtor_facts = facts.get("debtor") or {}
+    if not claim_facts and not debtor_facts:
+        # Regex extraction returns a flat payload while the LLM contract uses
+        # claim/debtor namespaces.  Normalize both forms before generating a
+        # reviewable proposal; otherwise the fallback silently produced an
+        # empty proposal for every document.
+        claim_facts = {
+            field: facts.get(source)
+            for field, source in {
+                "has_judgment": "has_judgment",
+                "has_writ": "has_writ",
+                "secured": "has_secured",
+                "assignment_forbidden": "has_assignment_forbidden",
+                "counterclaim_risk": "has_counterclaim",
+                "personal_claim": "has_personal",
+                "court_case_no": "court_case",
+                "base_contract": "base_contract",
+            }.items()
+            if facts.get(source) is not None
+        }
+        inns = facts.get("inn") or []
+        ogrns = facts.get("ogrn") or []
+        if inns:
+            debtor_facts["inn"] = inns[0]
+        if ogrns:
+            debtor_facts["ogrn"] = ogrns[0]
     claim_fields = (
         "kind",
         "principal",

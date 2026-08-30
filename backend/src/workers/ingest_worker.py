@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 
 from selectolax.parser import HTMLParser
@@ -13,6 +14,7 @@ from src.connectors.efrsb import (
     SourceAccessError,
     SourceParseError,
     extract_debtor_inn,
+    extract_inn,
     fetch_page,
     iter_all_public_offers,
     parse_lot_card,
@@ -76,6 +78,38 @@ async def is_receivable_lot(
     return False
 
 
+def classify_price_schedule(
+    intervals: list[dict], now: datetime | None = None
+) -> str:
+    """Map parsed intervals to a safe operational status."""
+    if not intervals:
+        return PriceScheduleStatus.NOT_PRESENT.value
+    if any(bool(row.get("is_current")) for row in intervals):
+        return PriceScheduleStatus.PARSED.value
+    if any(not isinstance(row.get("starts_at"), datetime) for row in intervals):
+        return PriceScheduleStatus.UNPARSED.value
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    if all(
+        isinstance(row.get("starts_at"), datetime)
+        and row["starts_at"] > reference
+        for row in intervals
+    ):
+        return PriceScheduleStatus.NOT_STARTED.value
+    return PriceScheduleStatus.EXPIRED.value
+
+
+def _property_inn(props: dict[str, str], *markers: str) -> str | None:
+    for key, value in props.items():
+        lowered = key.lower()
+        if any(marker in lowered for marker in markers):
+            inns = extract_inn(value)
+            if inns:
+                return inns[0]
+    return None
+
+
 def parse_classifier(html: str) -> tuple[list[str], list[str]]:
     """Парсит блок классификатора имущества."""
     tree = HTMLParser(html)
@@ -89,14 +123,17 @@ def parse_classifier(html: str) -> tuple[list[str], list[str]]:
             code = cells[0].text().strip()
             label = " ".join(c.text().strip() for c in cells[1:])
             row_text = " ".join(cell.text().strip() for cell in cells)
-            if (
+            normalized_code = code.replace(" ", "")
+            looks_like_code = bool(
+                normalized_code.isdigit() and len(normalized_code) >= 6
+            ) or bool(re.fullmatch(r"\d{2}(?:[.\-]\d{2,})+", normalized_code))
+            if not looks_like_code and (
                 "%" in row_text
                 or "руб" in row_text.lower()
-                or any(char.isdigit() for char in row_text)
-                and any(separator in row_text for separator in (".", ":", "—", "-"))
+                or normalized_code in {"", "1", "2", "3", "4", "5"}
             ):
                 continue
-            if code and code[0].isdigit():
+            if code and code[0].isdigit() and looks_like_code:
                 codes.append(code)
                 labels.append(label)
             elif label:
@@ -214,8 +251,6 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     # therefore keep the last confirmed value.
     if "current_price" in card:
         lot.current_price = card["current_price"]
-    elif lot.current_price is None and card.get("start_price") is not None:
-        lot.current_price = card["start_price"]
     if "current_interval_from" in card:
         lot.current_interval_from = card["current_interval_from"]
     if "current_interval_to" in card:
@@ -261,16 +296,25 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             lot.price_schedule_status = PriceScheduleStatus.PARSED.value
         else:
             # The schedule is present but currently outside all intervals.
-            # Clear its price, but retain the last known end time.  This makes
-            # an expired auction explicitly ineligible for alert delivery.
+            # Clear its price, but retain the relevant boundary.  Future
+            # schedules are ``not_started``; ended schedules are ``expired``.
+            schedule_status = str(
+                card.get("price_schedule_status") or PriceScheduleStatus.EXPIRED.value
+            )
+            upcoming_row = min(
+                (row for row in interval_rows if row.get("starts_at") is not None),
+                key=lambda row: row["starts_at"],
+                default=None,
+            )
+            boundary_row = upcoming_row if schedule_status == PriceScheduleStatus.NOT_STARTED.value else latest_ended_row
             lot.current_price = None
             lot.current_interval_from = (
-                latest_ended_row.get("starts_at") if latest_ended_row else None
+                boundary_row.get("starts_at") if boundary_row else None
             )
             lot.current_interval_to = (
-                latest_ended_row.get("ends_at") if latest_ended_row else None
+                boundary_row.get("ends_at") if boundary_row else None
             )
-            lot.price_schedule_status = PriceScheduleStatus.EXPIRED.value
+            lot.price_schedule_status = schedule_status
 
     for file_data in card.get("documents") or []:
         if isinstance(file_data, str):
@@ -471,6 +515,15 @@ async def run_ingest() -> int:
                     ),
                     "",
                 )
+                bankrupt_inn = _property_inn(props, "банкрот", "должник")
+                organizer_inn = _property_inn(props, "организатор")
+                am_inn = _property_inn(props, "управляющ", "арбитражн")
+                etp_inn = _property_inn(props, "этп", "электронн")
+                excluded_inns = {
+                    value
+                    for value in (bankrupt_inn, organizer_inn, am_inn, etp_inn)
+                    if value
+                }
                 card = {
                     "efrsb_url": item.get("url"),
                     "lot_no": detail.get("lot_no") or item.get("lot_no") or 1,
@@ -479,7 +532,13 @@ async def run_ingest() -> int:
                     "start_price": start_price,
                     "nominal_claimed": nominal,
                     "raw_content": raw_content,
-                    "debtor_inn": extract_debtor_inn(description, title),
+                    "debtor_inn": extract_debtor_inn(
+                        description, title, exclude_inns=excluded_inns
+                    ),
+                    "bankrupt_inn": bankrupt_inn,
+                    "organizer_inn": organizer_inn,
+                    "am_inn": am_inn,
+                    "etp_inn": etp_inn,
                 }
                 if detail_loaded:
                     card.update(
@@ -503,22 +562,20 @@ async def run_ingest() -> int:
                                 marker in f"{title} {description or ''}".lower()
                                 for marker in ("единый лот", "корзина требований", "в составе лота")
                             ),
-                            "price_observed_at": datetime.now(UTC),
+                            "price_observed_at": (
+                                datetime.now(UTC) if current_interval else None
+                            ),
                             "price_source": "efrsb_public",
+                            "price_intervals": price_intervals,
                         }
                     )
                     if price_intervals:
                         card.update(
                             {
-                                "price_intervals": price_intervals,
                                 "current_price": current_interval.get("price") if current_interval else None,
                                 "current_interval_from": current_interval.get("starts_at") if current_interval else None,
                                 "current_interval_to": current_interval.get("ends_at") if current_interval else None,
-                                "price_schedule_status": (
-                                    PriceScheduleStatus.PARSED.value
-                                    if current_interval
-                                    else PriceScheduleStatus.EXPIRED.value
-                                ),
+                                "price_schedule_status": classify_price_schedule(price_intervals),
                             }
                         )
                     elif detail.get("price_reduction_html"):

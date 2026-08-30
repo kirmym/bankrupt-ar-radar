@@ -52,6 +52,8 @@ def fmt_lot_message(lot: dict[str, Any]) -> str:
         lines.append(f"⏰ До конца интервала: {str(lot['current_interval_to'])[:16]}")
     if stop_factors:
         lines.append(f"⚠️ Стоп-факторы: {', '.join(str(s) for s in stop_factors)}")
+    if lot.get("efrsb_url"):
+        lines.append(f"🔗 Источник: {lot['efrsb_url']}")
 
     return "\n".join(lines)
 

@@ -138,6 +138,22 @@ def test_fact_proposal_preserves_conflicts_for_manual_review():
     assert proposal["updates"]["debtor"]["inn"] == "7707083893"
 
 
+def test_flat_regex_facts_are_converted_into_claim_and_debtor_proposal():
+    proposal = propose_fact_updates(
+        {
+            "facts": {
+                "inn": ["7707083893"],
+                "has_judgment": True,
+                "has_writ": True,
+                "court_case": "А40-12345/2023",
+            }
+        }
+    )
+    assert proposal["updates"]["debtor"]["inn"] == "7707083893"
+    assert proposal["updates"]["claim"]["has_judgment"] is True
+    assert proposal["updates"]["claim"]["court_case_no"] == "А40-12345/2023"
+
+
 def test_document_adapter_is_selected_by_allowlisted_host():
     assert adapter_for_document_url("https://elektortorgi.ru/file.pdf") is CdtAdapter
     assert adapter_for_document_url("https://utp.sberbank-ast.ru/File/a.pdf").__name__ == "SberbankAdapter"

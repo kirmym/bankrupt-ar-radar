@@ -8,7 +8,11 @@ import pytest
 
 from src.models.entities import Claim, Document, Lot, Party, Trade
 from src.models.enums import ClaimKind, PartyRole
-from src.workers.ingest_worker import persist_trade_and_lot
+from src.workers.ingest_worker import (
+    classify_price_schedule,
+    parse_classifier,
+    persist_trade_and_lot,
+)
 
 
 class FakeResult:
@@ -200,3 +204,31 @@ async def test_unparsed_schedule_does_not_clear_last_confirmed_price():
     )
 
     assert lot.current_price == Decimal("10000")
+
+
+def test_classifier_keeps_valid_dotted_code_and_discards_sequence_price_row():
+    codes, labels = parse_classifier(
+        """
+        <table>
+          <tr><td>01.17.12</td><td>Права требования</td></tr>
+          <tr><td>1</td><td>100 000 руб.</td></tr>
+        </table>
+        """
+    )
+    assert codes == ["01.17.12"]
+    assert labels == ["Права требования"]
+
+
+def test_future_price_schedule_is_not_marked_expired():
+    future = datetime(2026, 9, 1, tzinfo=UTC)
+    assert classify_price_schedule(
+        [{"starts_at": future, "ends_at": None, "is_current": False}],
+        now=datetime(2026, 8, 30, tzinfo=UTC),
+    ) == "not_started"
+
+
+def test_price_without_dates_is_unparsed_and_ineligible_for_alerts():
+    assert classify_price_schedule(
+        [{"price": Decimal("100"), "is_current": False}],
+        now=datetime(2026, 8, 30, tzinfo=UTC),
+    ) == "unparsed"

@@ -147,12 +147,14 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/health` | GET | Проверка |
 | `/api/v1/lots` | GET | Лента лотов с фильтрами |
 | `/api/v1/lots/{id}` | GET | Карточка лота |
+| `/api/v1/lots/{id}/debtor` | PUT | Ручная привязка ИНН дебитора (с `X-API-Key`) |
+| `/api/v1/documents/{id}/proposal/apply` | POST | Применить подтвержденное предложение фактов (с `X-API-Key`) |
 | `/api/v1/stats` | GET | Дашборд-агрегаты |
 | `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
 | `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought) |
 | `/docs` | GET | Swagger UI |
 
-Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `page`/`page_size`.
+Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`.
 
 ## Telegram-алерты
 

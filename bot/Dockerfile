@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install uv
 
 COPY bot/pyproject.toml ./pyproject.toml
+COPY bot/uv.lock ./uv.lock
 COPY bot/src ./src
-RUN pip install --no-cache-dir .
+RUN uv sync --frozen --no-dev
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "src.bot.main"]
+CMD ["uv", "run", "python", "-m", "src.bot.main"]

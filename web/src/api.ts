@@ -132,6 +132,8 @@ export interface DashboardStats {
 export const lotsApi = {
   list: (params: Record<string, unknown> = {}) => api.get<LotList>("/lots", { params }),
   get: (id: number) => api.get<Lot>(`/lots/${id}`),
+  assignDebtor: (id: number, payload: { inn: string; name?: string }) =>
+    api.put<Lot>(`/lots/${id}/debtor`, payload),
 };
 
 export const statsApi = {

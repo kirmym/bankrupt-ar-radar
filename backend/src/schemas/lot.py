@@ -275,6 +275,13 @@ class FeedbackSchema(BaseModel):
     created_at: datetime
 
 
+class DebtorAssignCreate(BaseModel):
+    """Manual debtor assignment used when a public card omits the debtor INN."""
+
+    inn: str = Field(min_length=10, max_length=12, pattern=r"^\d{10}(\d{2})?$")
+    name: str | None = Field(default=None, max_length=500)
+
+
 # ── Ответы ───────────────────────────────────────────────────────────────────
 
 

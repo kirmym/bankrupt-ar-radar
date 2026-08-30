@@ -13,34 +13,48 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from src.api.diagnostics import router as diagnostics_router
 from src.api.security import require_api_access
 from src.config import get_settings
+from src.connectors.efrsb import is_valid_inn
 from src.database import get_db
 from src.models.entities import (
     AlertState,
     Claim,
+    Document,
     ImportCheckpoint,
     ImportRun,
     Lot,
     Party,
+    ScoreSnapshot,
     Trade,
     UserFeedback,
 )
-from src.models.enums import LotClass, TradeStatus
+from src.models.enums import (
+    ClaimKind,
+    LotClass,
+    PartyRole,
+    PersonKind,
+    PriceScheduleStatus,
+    TradeStatus,
+)
 from src.runtime import start_background_tasks, stop_background_tasks
 from src.schemas.lot import (
     DashboardStats,
+    DebtorAssignCreate,
+    DocumentSchema,
     FeedbackCreate,
     FeedbackSchema,
     HealthResponse,
     LotCardSchema,
     LotListSchema,
     LotSchema,
+    ScoreSnapshotSchema,
 )
 from src.version import VERSION
 
@@ -153,6 +167,10 @@ async def list_lots(
     search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     trade_status: TradeStatus | None = None,
     deadline_before: datetime | None = None,
+    etp_name: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+    has_debtor: bool | None = None,
+    has_court: bool | None = None,
+    price_status: PriceScheduleStatus | None = None,
 ) -> LotListSchema:
     """Лента лотов с фильтрацией."""
     q = (
@@ -188,6 +206,18 @@ async def list_lots(
         )
     if trade_status:
         q = q.where(Trade.status == trade_status.value)
+    if etp_name:
+        q = q.where(Trade.etp_name.ilike(f"%{etp_name.strip()}%"))
+    if has_debtor is True:
+        q = q.where(Lot.claims.any(Claim.debtor_party_id.isnot(None)))
+    elif has_debtor is False:
+        q = q.where(~Lot.claims.any(Claim.debtor_party_id.isnot(None)))
+    if has_court is True:
+        q = q.where(Lot.claims.any(Claim.court_case_no.isnot(None)))
+    elif has_court is False:
+        q = q.where(~Lot.claims.any(Claim.court_case_no.isnot(None)))
+    if price_status:
+        q = q.where(Lot.price_schedule_status == price_status.value)
     if deadline_before is not None:
         if deadline_before.tzinfo is None:
             raise HTTPException(status_code=422, detail="deadline_before must include a timezone")
@@ -227,13 +257,186 @@ async def get_lot(
             selectinload(Lot.claims).selectinload(Claim.guarantor_party),
             selectinload(Lot.price_intervals),
             selectinload(Lot.documents),
-            selectinload(Lot.score_snapshots),
         )
     )
     lot = result.scalar_one_or_none()
     if not lot:
         raise HTTPException(status_code=404, detail="Lot not found")
-    return LotCardSchema.model_validate(lot, from_attributes=True)
+    snapshots = (
+        await db.execute(
+            select(ScoreSnapshot)
+            .where(ScoreSnapshot.lot_id == lot.id)
+            .order_by(desc(ScoreSnapshot.scored_at))
+            .limit(50)
+        )
+    ).scalars().all()
+    set_committed_value(lot, "score_snapshots", snapshots)
+    payload = LotCardSchema.model_validate(lot, from_attributes=True)
+    payload.score_snapshots = [
+        ScoreSnapshotSchema.model_validate(snapshot, from_attributes=True)
+        for snapshot in snapshots
+    ]
+    return payload
+
+
+@app.put(
+    "/api/v1/lots/{lot_id}/debtor",
+    response_model=LotCardSchema,
+    tags=["lots"],
+    dependencies=[Depends(require_api_access)],
+)
+async def assign_debtor(
+    lot_id: int,
+    payload: DebtorAssignCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LotCardSchema:
+    """Attach a manually verified debtor INN and invalidate the lot score."""
+    if not is_valid_inn(payload.inn):
+        raise HTTPException(status_code=422, detail="Invalid INN check digits")
+    lot = (
+        await db.execute(
+            select(Lot)
+            .where(Lot.id == lot_id)
+            .options(selectinload(Lot.claims))
+        )
+    ).scalar_one_or_none()
+    if lot is None:
+        raise HTTPException(status_code=404, detail="Lot not found")
+
+    debtor = await db.scalar(
+        select(Party).where(
+            Party.role == PartyRole.DEBTOR.value,
+            Party.inn == payload.inn,
+        )
+    )
+    if debtor is None:
+        debtor = Party(
+            role=PartyRole.DEBTOR.value,
+            person_kind=PersonKind.UL.value if len(payload.inn) == 10 else PersonKind.FL.value,
+            inn=payload.inn,
+            name=payload.name,
+        )
+        db.add(debtor)
+        await db.flush()
+    elif payload.name and not debtor.name:
+        debtor.name = payload.name
+
+    claim = min(lot.claims, key=lambda item: item.id, default=None)
+    if claim is None:
+        claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
+        db.add(claim)
+    claim.debtor_party_id = debtor.id
+    lot.updated_at = datetime.now(UTC)
+    await db.commit()
+
+    refreshed = (
+        await db.execute(
+            select(Lot)
+            .where(Lot.id == lot_id)
+            .options(
+                selectinload(Lot.trade).selectinload(Trade.bankrupt_party),
+                selectinload(Lot.claims).selectinload(Claim.debtor_party),
+                selectinload(Lot.claims).selectinload(Claim.guarantor_party),
+                selectinload(Lot.price_intervals),
+                selectinload(Lot.documents),
+            )
+        )
+    ).scalar_one()
+    snapshots = (
+        await db.execute(
+            select(ScoreSnapshot)
+            .where(ScoreSnapshot.lot_id == refreshed.id)
+            .order_by(desc(ScoreSnapshot.scored_at))
+            .limit(50)
+        )
+    ).scalars().all()
+    set_committed_value(refreshed, "score_snapshots", snapshots)
+    response_payload = LotCardSchema.model_validate(refreshed, from_attributes=True)
+    response_payload.score_snapshots = [
+        ScoreSnapshotSchema.model_validate(snapshot, from_attributes=True)
+        for snapshot in snapshots
+    ]
+    return response_payload
+
+
+@app.post(
+    "/api/v1/documents/{document_id}/proposal/apply",
+    response_model=DocumentSchema,
+    tags=["documents"],
+    dependencies=[Depends(require_api_access)],
+)
+async def apply_document_proposal(
+    document_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DocumentSchema:
+    """Apply only the reviewable facts extracted from a document."""
+    document = await db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    payload = document.extracted_facts or {}
+    proposal = payload.get("proposal") if isinstance(payload, dict) else None
+    updates = proposal.get("updates") if isinstance(proposal, dict) else None
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=409, detail="Document has no fact proposal")
+
+    claim = (
+        await db.execute(
+            select(Claim)
+            .where(Claim.lot_id == document.lot_id)
+            .options(selectinload(Claim.debtor_party))
+            .order_by(Claim.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    lot = await db.get(Lot, document.lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404, detail="Lot not found")
+
+    claim_updates = updates.get("claim") or {}
+    debtor_updates = updates.get("debtor") or {}
+    if claim is None and (claim_updates or debtor_updates):
+        claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
+        db.add(claim)
+        await db.flush()
+    if claim is not None and isinstance(claim_updates, dict):
+        allowed_claim_fields = {
+            "kind", "principal", "penalties", "currency", "base_contract", "base_date",
+            "due_date", "court_case_no", "has_judgment", "has_writ", "secured",
+            "assignment_forbidden", "counterclaim_risk", "personal_claim",
+        }
+        for field, value in claim_updates.items():
+            if field in allowed_claim_fields:
+                if field in {"base_date", "due_date"} and isinstance(value, str):
+                    try:
+                        value = datetime.fromisoformat(value).date()
+                    except ValueError:
+                        continue
+                setattr(claim, field, value)
+
+    if claim is not None and isinstance(debtor_updates, dict):
+        debtor = claim.debtor_party
+        if debtor is None and debtor_updates.get("inn"):
+            debtor = Party(
+                role=PartyRole.DEBTOR.value,
+                person_kind=PersonKind.UL.value
+                if len(str(debtor_updates["inn"])) == 10
+                else PersonKind.FL.value,
+                inn=str(debtor_updates["inn"]),
+            )
+            db.add(debtor)
+            await db.flush()
+            claim.debtor_party = debtor
+        if debtor is not None:
+            for field in ("name", "inn", "ogrn"):
+                if field in debtor_updates and getattr(debtor, field, None) is None:
+                    setattr(debtor, field, debtor_updates[field])
+
+    lot.updated_at = datetime.now(UTC)
+    payload["proposal_applied_at"] = datetime.now(UTC).isoformat()
+    document.extracted_facts = payload
+    await db.commit()
+    await db.refresh(document)
+    return DocumentSchema.model_validate(document, from_attributes=True)
 
 
 # ── Статистика ────────────────────────────────────────────────────────────────
@@ -274,7 +477,8 @@ async def get_stats(
     alerts_sent_today = (
         await db.execute(
             select(func.count(AlertState.id)).where(
-                AlertState.alerted_at >= datetime.now(UTC) - timedelta(days=1)
+                AlertState.sent_at >= datetime.now(UTC) - timedelta(days=1),
+                AlertState.status == "sent",
             )
         )
     ).scalar() or 0
