@@ -171,6 +171,36 @@ async def test_egrul_public_search_row_applies_status_when_source_supplies_it(
     assert party.status == "active"
 
 
+def test_egrul_extract_parser_marks_explicit_adverse_flags() -> None:
+    from src.connectors.enrich import _parse_egrul_extract
+
+    parsed = _parse_egrul_extract(
+        "Сведения недостоверны. Адрес юридического лица недостоверен. "
+        "Решение о предстоящем исключении ЮЛ из ЕГРЮЛ."
+    )
+
+    assert parsed["status"] == "invalid"
+    assert parsed["invalid_address"] is True
+    assert parsed["pending_exclusion"] is True
+
+
+def test_egrul_extract_parser_does_not_treat_pending_exclusion_as_completed() -> None:
+    from src.connectors.enrich import _parse_egrul_extract
+
+    parsed = _parse_egrul_extract("Решение о предстоящем исключении ЮЛ из ЕГРЮЛ")
+
+    assert parsed["pending_exclusion"] is True
+    assert parsed["status"] is None
+
+
+def test_egrul_extract_parser_does_not_mark_negative_liquidation_phrase() -> None:
+    from src.connectors.enrich import _parse_egrul_extract
+
+    parsed = _parse_egrul_extract("Юридическое лицо не находится в процессе ликвидации")
+
+    assert parsed["status"] is None
+
+
 @pytest.mark.asyncio
 async def test_fssp_no_results_are_not_marked_uncollectible(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.connectors import enrich

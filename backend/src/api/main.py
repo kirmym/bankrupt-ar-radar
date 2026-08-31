@@ -138,19 +138,20 @@ async def ingest_status(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, object | None]:
     """Return the latest ingest run and durable page checkpoint."""
+    source = settings.primary_ingest_source
     run = (
         await db.execute(
             select(ImportRun)
-            .where(ImportRun.source == "efrsb_public")
+            .where(ImportRun.source == source)
             .order_by(ImportRun.started_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
     checkpoint = await db.scalar(
-        select(ImportCheckpoint).where(ImportCheckpoint.source == "efrsb_public")
+        select(ImportCheckpoint).where(ImportCheckpoint.source == source)
     )
     return {
-        "source": "efrsb_public",
+        "source": source,
         "run": (
             {
                 "id": run.id,
@@ -511,7 +512,7 @@ async def get_stats(
     last_ingest = (
         await db.execute(
             select(func.max(ImportRun.finished_at)).where(
-                ImportRun.source == "efrsb_public",
+                ImportRun.source == settings.primary_ingest_source,
                 ImportRun.status == "finished",
             )
         )

@@ -36,6 +36,19 @@ class Settings(BaseSettings):
     telegram_chat_ids: str = ""
 
     efrsb_public_url: str = "https://old.bankrot.fedresurs.ru"
+    # Operational seed sources. CDT is enabled by default because its public
+    # JSON endpoints are currently reachable without credentials. EFRSB can be
+    # added back with INGEST_SOURCES=cdt,efrsb when its public route works.
+    ingest_sources: str = "cdt"
+    cdt_api_url: str = "https://webapi.torgi.cdtrf.ru"
+    cdt_ingest_max_items: int = 250
+    cdt_detail_concurrency: int = 4
+    # Official FNS EGRUL extract is free but slower than the search card.
+    # Keep it enabled for risk flags, with a bounded polling window.
+    egrul_extract_enabled: bool = True
+    egrul_extract_timeout_seconds: int = 30
+    egrul_extract_poll_seconds: float = 0.5
+    egrul_extract_max_polls: int = 8
     # CDP endpoint already opened in CloakBrowser; optional challenge fallback.
     cloakbrowser_cdp_url: str = ""
     cloakbrowser_timeout_seconds: int = 90
@@ -93,6 +106,15 @@ class Settings(BaseSettings):
     @property
     def free_api_sources_list(self) -> set[str]:
         return {x.strip().lower() for x in self.free_api_sources.split(",") if x.strip()}
+
+    @property
+    def ingest_sources_list(self) -> list[str]:
+        return [x.strip().lower() for x in self.ingest_sources.split(",") if x.strip()]
+
+    @property
+    def primary_ingest_source(self) -> str:
+        source = self.ingest_sources_list[0] if self.ingest_sources_list else "cdt"
+        return {"cdt": "cdt_public", "efrsb": "efrsb_public"}.get(source, source)
 
     @property
     def async_database_url(self) -> str:

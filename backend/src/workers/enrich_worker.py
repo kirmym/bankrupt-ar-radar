@@ -80,9 +80,11 @@ async def run_enrich(batch_size: int = 50) -> int:
                 # One timestamp is used by scoring as the identity/status
                 # verification timestamp. FSSP/KAD results must not make a
                 # stale EGRUL status look fresh.
-                egrul_verified = bool(statuses.get("egrul", False)) and (
-                    debtor.status is not None or len(debtor.inn or "") == 12
-                )
+                # The public FNS search can verify an exact organization row
+                # without returning lifecycle status. That identity evidence
+                # is sufficient to refresh the timestamp; scoring exposes an
+                # unknown status as a gap and still blocks stale identities.
+                egrul_verified = bool(statuses.get("egrul", False))
                 if egrul_verified:
                     updated_at = attempt_at
                     debtor.source_as_of = updated_at

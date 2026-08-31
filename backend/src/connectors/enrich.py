@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote_plus, urlparse
 
 import httpx
+from pypdf import PdfReader
 from selectolax.parser import HTMLParser
 
 from src.config import get_settings
@@ -66,6 +68,133 @@ async def _fetch_egrul_rows(inn: str) -> list[dict[str, object]] | None:
     except (httpx.HTTPError, ValueError, TypeError):
         logger.exception("EGRUL public search failed for INN %s", inn)
     return None
+
+
+async def _fetch_egrul_extract(row_token: str) -> str | None:
+    """Download the official, free FNS EGRUL extract for a search row.
+
+    The public site exposes a short-lived three-step contract.  It is not a
+    paid API and can be rate limited, so every request is bounded and a
+    challenge simply falls back to the normal CloakBrowser HTML path.
+    """
+    if not row_token:
+        return None
+    settings = get_settings()
+    timeout = float(getattr(settings, "egrul_extract_timeout_seconds", 30))
+    poll_seconds = max(0.1, float(getattr(settings, "egrul_extract_poll_seconds", 0.5)))
+    max_polls = max(1, int(getattr(settings, "egrul_extract_max_polls", 8)))
+    base_url = EGRUL_PUBLIC_SEARCH_URL.rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            requested = await client.get(f"{base_url}/vyp-request/{row_token}")
+            if requested.status_code in (401, 403, 429):
+                return None
+            requested.raise_for_status()
+            request_payload = requested.json()
+            if not isinstance(request_payload, dict) or request_payload.get("captchaRequired"):
+                return None
+            extract_token = request_payload.get("t") or row_token
+            if not isinstance(extract_token, str) or not extract_token:
+                return None
+
+            for attempt in range(max_polls):
+                status_response = await client.get(f"{base_url}/vyp-status/{extract_token}")
+                if status_response.status_code in (401, 403, 429):
+                    return None
+                status_response.raise_for_status()
+                status_payload = status_response.json()
+                status = status_payload.get("status") if isinstance(status_payload, dict) else None
+                if status == "ready":
+                    break
+                if status in {"error", "failed", "not_found"}:
+                    return None
+                if attempt + 1 < max_polls:
+                    await asyncio.sleep(poll_seconds)
+            else:
+                return None
+
+            document = await client.get(f"{base_url}/vyp-download/{extract_token}")
+            if document.status_code in (401, 403, 429):
+                return None
+            document.raise_for_status()
+            content_type = document.headers.get("content-type", "").lower()
+            if "pdf" not in content_type or not document.content.startswith(b"%PDF"):
+                return None
+            if len(document.content) > 8 * 1024 * 1024:
+                logger.warning("EGRUL extract is unexpectedly large: %d bytes", len(document.content))
+                return None
+            reader = PdfReader(io.BytesIO(document.content))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            return text if text.strip() else None
+    except (httpx.HTTPError, ValueError, TypeError, OSError):
+        logger.warning("EGRUL extract download failed", exc_info=True)
+        return None
+
+
+def _parse_egrul_extract(text: str) -> dict[str, object]:
+    """Extract only explicit adverse markers from a FNS PDF.
+
+    Absence of an adverse marker is deliberately not interpreted as ``active``
+    because the extract format does not provide a single authoritative status
+    field in every version of the public form.
+    """
+    compact = re.sub(r"\s+", " ", text.lower()).strip()
+    pending_exclusion = bool(
+        re.search(r"предстоящ(?:ем|ее|его)\s+исключен|решени[ея]\s+о\s+предстоящем\s+исключ", compact)
+    )
+    invalid = "сведения недостовер" in compact or "недостоверности сведений" in compact
+    invalid_address = bool(
+        re.search(r"(?:адрес[^.]{0,120}недостовер|недостовер[^.]{0,120}адрес)", compact)
+    )
+    invalid_director = bool(
+        re.search(
+            r"(?:руководител|директор)[^.]{0,120}недостовер|недостовер[^.]{0,120}(?:руководител|директор)",
+            compact,
+        )
+    )
+    excluded = bool(
+        re.search(r"исключен(?:о|а)?\s+из\s+егрюл|исключение\s+юридического\s+лица\s+заверш", compact)
+    )
+    liquidation = bool(
+        re.search(
+            r"(?<!не\s)находится\s+в\s+процессе\s+ликвидац|"
+            r"ликвидационн(?:ая|ой)\s+комисс|ликвидатор",
+            compact,
+        )
+    )
+    bankruptcy = bool(re.search(r"процедур[аы]\s+банкротств|дело\s+о\s+банкротств", compact))
+
+    status: str | None = None
+    if excluded and not pending_exclusion:
+        status = "excluded"
+    elif liquidation:
+        status = "liquidation"
+    elif bankruptcy:
+        status = "bankruptcy"
+    elif invalid:
+        status = "invalid"
+
+    return {
+        "status": status,
+        "invalid_address": invalid_address,
+        "invalid_director": invalid_director,
+        "pending_exclusion": pending_exclusion,
+    }
+
+
+def _apply_egrul_extract(party: Party, parsed: dict[str, object]) -> bool:
+    """Apply explicit risk flags from a validated FNS extract."""
+    changed = False
+    status = parsed.get("status")
+    if isinstance(status, str) and status:
+        party.status = status
+        changed = True
+    for field in ("invalid_address", "invalid_director", "pending_exclusion"):
+        if parsed.get(field) is True:
+            setattr(party, field, True)
+            changed = True
+    return changed
 
 
 def _egrul_status(value: object) -> str | None:
@@ -174,6 +303,7 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
 
     inn = party.inn
     url = f"https://egrul.nalog.ru/index.html?query={quote_plus(inn)}"
+    settings = get_settings()
 
     try:
         row_applied = False
@@ -185,6 +315,18 @@ async def enrich_from_egrul(party: Party, session: AsyncSession) -> bool:
             row_applied = _apply_egrul_row(party, exact_row)
             if row_applied and party.status is not None:
                 return True
+
+            # The short search card has no lifecycle status on the current
+            # public contract.  Fetch the free official extract only when the
+            # feature is enabled and the row contains its opaque token.
+            if row_applied and getattr(settings, "egrul_extract_enabled", False):
+                row_token = exact_row.get("t")
+                if isinstance(row_token, str) and row_token:
+                    extract_text = await _fetch_egrul_extract(row_token)
+                    if extract_text:
+                        _apply_egrul_extract(party, _parse_egrul_extract(extract_text))
+                        party.source_as_of = datetime.now(UTC)
+                        return True
 
         # The browser path is retained as the CAPTCHA fallback.  It also
         # supports deployments where the FNS changes the JSON response but
@@ -348,8 +490,13 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
 
 async def enrich_party(party: Party, session: AsyncSession) -> dict[str, bool]:
     """Обогащает лицо без конкурентных commit одной SQLAlchemy-сессии."""
-    return {
-        "egrul": await enrich_from_egrul(party, session),
-        "fssp": await enrich_from_fssp(party, session),
-        "kad": await enrich_from_kad(party, session),
-    }
+    # The connectors only mutate disjoint fields on the same in-memory party;
+    # database writes remain serialized by the worker after all requests finish.
+    # Running the independent public-source requests together prevents a slow
+    # or blocked KAD/FSSP endpoint from delaying the EGRUL identity result.
+    egrul, fssp, kad = await asyncio.gather(
+        enrich_from_egrul(party, session),
+        enrich_from_fssp(party, session),
+        enrich_from_kad(party, session),
+    )
+    return {"egrul": egrul, "fssp": fssp, "kad": kad}

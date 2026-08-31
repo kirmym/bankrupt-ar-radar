@@ -428,6 +428,46 @@ def test_unverified_debtor_blocks_signal_and_max_bid():
     assert StopFactor.DEBTOR_UNVERIFIED in result.stop_factors
 
 
+def test_fresh_identity_without_lifecycle_status_is_a_gap_not_a_stop_factor():
+    debtor = DebtorPartySchema(
+        inn="7707083893",
+        source_as_of=datetime.now(UTC),
+    )
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            claims=[make_claim(principal=Decimal("1000000"), has_writ=True)],
+            debtor=debtor,
+        )
+    )
+
+    assert StopFactor.DEBTOR_UNVERIFIED not in result.stop_factors
+    assert Gap.DEBTOR_STATUS_MISSING in result.gaps
+
+
+def test_explicit_egrul_risk_flags_block_a_signal():
+    debtor = DebtorPartySchema(
+        inn="7707083893",
+        status=OrgStatus.INVALID,
+        pending_exclusion=True,
+        source_as_of=datetime.now(UTC),
+    )
+    result = compute_ev_and_class(
+        ScoreInput(
+            lot_id=1,
+            current_price=Decimal("10000"),
+            claims=[make_claim(principal=Decimal("1000000"), has_writ=True)],
+            debtor=debtor,
+        )
+    )
+
+    assert result.score_class == LotClass.D
+    assert result.max_bid == Decimal(0)
+    assert StopFactor.DEBTOR_INVALID in result.stop_factors
+    assert StopFactor.DEBTOR_PENDING_EXCLUSION in result.stop_factors
+
+
 def test_bundle_with_aggregate_claim_is_blocked():
     result = compute_ev_and_class(
         ScoreInput(

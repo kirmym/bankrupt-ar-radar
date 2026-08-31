@@ -225,14 +225,22 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             stop_factors.append(StopFactor.DEBTOR_EXCLUDED)
         elif debtor_status == "liquidation":
             stop_factors.append(StopFactor.DEBTOR_LIQUIDATION)
+        if debtor_status == "invalid" or debtor.invalid_address or debtor.invalid_director:
+            stop_factors.append(StopFactor.DEBTOR_INVALID)
+        if debtor.pending_exclusion:
+            stop_factors.append(StopFactor.DEBTOR_PENDING_EXCLUSION)
         source_as_of = debtor.source_as_of
         if (
-            debtor.status is None
-            or source_as_of is None
+            source_as_of is None
             or source_as_of.tzinfo is None
             or source_as_of < datetime.now(UTC) - timedelta(days=1)
         ):
             stop_factors.append(StopFactor.DEBTOR_UNVERIFIED)
+        elif debtor.status is None:
+            # The free FNS search confirms the exact INN/name/OGRN but often
+            # omits a lifecycle status. Keep the fresh identity usable for
+            # economics while exposing the missing status as a visible gap.
+            gaps.append(Gap.DEBTOR_STATUS_MISSING)
 
         if debtor.fssp_uncollectible:
             gaps.append(Gap.FSSP_UNCOLLECTIBLE)

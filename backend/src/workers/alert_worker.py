@@ -169,12 +169,16 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
     async with async_session_factory() as session:
         latest_import_status = await session.scalar(
             select(ImportRun.status)
-            .where(ImportRun.source == "efrsb_public")
+            .where(ImportRun.source == settings.primary_ingest_source)
             .order_by(ImportRun.started_at.desc())
             .limit(1)
         )
         if latest_import_status is not None and latest_import_status != "finished":
-            logger.warning("alerts: latest EFRSB import is %s, skip", latest_import_status)
+            logger.warning(
+                "alerts: latest %s import is %s, skip",
+                settings.primary_ingest_source,
+                latest_import_status,
+            )
             return 0
 
         stmt = build_alert_candidates_stmt(

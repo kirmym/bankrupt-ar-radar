@@ -1,4 +1,4 @@
-"""Ingest worker — собирает лоты с ЕФРСБ."""
+"""Ingest worker — collects receivables from operational public sources."""
 from __future__ import annotations
 
 import asyncio
@@ -173,9 +173,12 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     trade = result.scalar_one_or_none()
 
     if not trade:
+        trade_kind = card.get("trade_kind")
+        if trade_kind not in {item.value for item in TradeKind}:
+            trade_kind = TradeKind.PUBLIC_OFFER.value
         trade = Trade(
             efrsb_url=card["efrsb_url"],
-            trade_kind=TradeKind.PUBLIC_OFFER.value,
+            trade_kind=trade_kind,
             trade_form=TradeForm.OPEN.value,
             status=TradeStatus.IN_PROGRESS.value,
         )
@@ -204,6 +207,8 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         if value is not None:
             setattr(trade, field, value)
 
+    source_name = str(card.get("source_name") or "efrsb_public")[:50]
+    snapshot_content_type = str(card.get("snapshot_content_type") or "text/html")[:50]
     raw_content = card.get("raw_content")
     if isinstance(raw_content, str) and raw_content:
         raw_content = raw_content[:1_000_000]
@@ -212,7 +217,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         existing_snapshot = await db.scalar(
             select(RawSnapshot)
             .where(
-                RawSnapshot.source == "efrsb_public",
+                RawSnapshot.source == source_name,
                 RawSnapshot.source_url == card["efrsb_url"],
                 RawSnapshot.raw_content == raw_content,
             )
@@ -225,9 +230,9 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             raw_content = None
     if isinstance(raw_content, str) and raw_content:
         snapshot = RawSnapshot(
-            source="efrsb_public",
+            source=source_name,
             source_url=card["efrsb_url"],
-            content_type="text/html",
+            content_type=snapshot_content_type,
             raw_content=raw_content[:1_000_000],
         )
         db.add(snapshot)
@@ -435,9 +440,9 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     return trade, lot
 
 
-async def run_ingest() -> int:
-    """Главный цикл ingest. Возвращает количество обработанных лотов."""
-    logger.info("ingest: starting")
+async def run_efrsb_ingest() -> int:
+    """Run the legacy EFRSB ingest independently from other sources."""
+    logger.info("ingest: starting EFRSB")
     from src.database import get_db_context
 
     processed = 0
@@ -669,6 +674,104 @@ async def run_ingest() -> int:
             await db.commit()
             raise
     return processed
+
+
+async def run_cdt_ingest() -> int:
+    """Seed active public-offer receivables from the free public CDT API."""
+    from src.connectors.cdt_source import CdtPublicSource
+    from src.database import get_db_context
+
+    source_name = "cdt_public"
+    processed = 0
+    logger.info("ingest: starting CDT public source")
+    async with get_db_context() as db:
+        run = ImportRun(source=source_name, status="running")
+        db.add(run)
+        await db.flush()
+        await db.commit()
+        try:
+            async with CdtPublicSource(
+                api_url=settings.cdt_api_url,
+                detail_concurrency=settings.cdt_detail_concurrency,
+            ) as source:
+                async for card in source.iter_receivables(
+                    max_pages=settings.ingest_max_pages,
+                    per_page=settings.ingest_page_size,
+                    max_items=settings.cdt_ingest_max_items,
+                ):
+                    run.items_seen += 1
+                    saved = await persist_trade_and_lot(card, db)
+                    if saved:
+                        processed += 1
+                        run.items_upserted += 1
+                    run.last_page = processed
+                    checkpoint = await db.scalar(
+                        select(ImportCheckpoint).where(ImportCheckpoint.source == source_name)
+                    )
+                    if checkpoint is None:
+                        checkpoint = ImportCheckpoint(source=source_name)
+                        db.add(checkpoint)
+                    checkpoint.cursor = str(card.get("trade_id_on_etp") or processed)
+                    checkpoint.updated_at = datetime.now(UTC)
+                    await db.commit()
+            run.status = "finished"
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            logger.info("ingest: processed %d CDT receivables", processed)
+        except SourceParseError as exc:
+            await db.rollback()
+            run.status = "failed"
+            run.error_code = "parse_error"
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            raise
+        except SourceAccessError as exc:
+            await db.rollback()
+            run.status = "paused"
+            run.error_code = "source_access"
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            raise
+        except Exception as exc:
+            await db.rollback()
+            run.status = "failed"
+            run.error_code = type(exc).__name__[:50]
+            run.error_message = str(exc)[:500]
+            run.finished_at = datetime.now(UTC)
+            await db.commit()
+            raise
+    return processed
+
+
+async def run_ingest() -> int:
+    """Run configured seed sources; one unavailable source cannot block another."""
+    runners = {"cdt": run_cdt_ingest, "efrsb": run_efrsb_ingest}
+    configured = settings.ingest_sources_list or ["cdt"]
+    processed = 0
+    completed_sources = 0
+    errors: list[Exception] = []
+    for source_name in configured:
+        runner = runners.get(source_name)
+        if runner is None:
+            errors.append(ValueError(f"unknown ingest source: {source_name}"))
+            logger.error("ingest: unknown configured source %s", source_name)
+            continue
+        try:
+            processed += await runner()
+            completed_sources += 1
+        except (SourceAccessError, SourceParseError) as exc:
+            errors.append(exc)
+            logger.warning("ingest: source %s unavailable: %s", source_name, exc)
+        except Exception as exc:
+            errors.append(exc)
+            logger.exception("ingest: source %s failed", source_name)
+    if completed_sources:
+        return processed
+    if errors:
+        raise errors[0]
+    return 0
 
 
 async def main() -> None:

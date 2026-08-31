@@ -23,17 +23,17 @@ settings = get_settings()
 @app.command()
 def health() -> None:
     """Проверить здоровье системы."""
-    console.print(f"✓ Backend OK (env={settings.app_env})", style="green")
+    console.print(f"OK Backend (env={settings.app_env})", style="green")
 
 
 @app.command()
 def ingest() -> None:
-    """Запустить ingest ЕФРСБ."""
+    """Запустить ingest настроенных публичных источников."""
     from src.workers.ingest_worker import run_ingest
 
     async def _run() -> None:
         count = await run_ingest()
-        console.print(f"✓ Ingest: {count} lots", style="green")
+        console.print(f"OK Ingest: {count} lots", style="green")
 
     asyncio.run(_run())
 
@@ -45,7 +45,7 @@ def enrich() -> None:
 
     async def _run() -> None:
         count = await run_enrich()
-        console.print(f"✓ Enrich: {count} debtors", style="green")
+        console.print(f"OK Enrich: {count} debtors", style="green")
 
     asyncio.run(_run())
 
@@ -57,7 +57,7 @@ def score() -> None:
 
     async def _run() -> None:
         count = await run_rescore()
-        console.print(f"✓ Score: {count} lots", style="green")
+        console.print(f"OK Score: {count} lots", style="green")
 
     asyncio.run(_run())
 
@@ -69,7 +69,7 @@ def etp_refresh() -> None:
 
     async def _run() -> None:
         count = await run_etp_refresh()
-        console.print(f"✓ ETP refresh: {count} lots", style="green")
+        console.print(f"OK ETP refresh: {count} lots", style="green")
 
     asyncio.run(_run())
 
@@ -91,7 +91,7 @@ def init_db() -> None:
     async def _run() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        console.print("✓ Tables created", style="green")
+        console.print("OK Tables created", style="green")
 
     asyncio.run(_run())
 

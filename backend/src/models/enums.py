@@ -89,11 +89,14 @@ class StopFactor(StrEnum):
     REGISTRY_CLAIM_ON_BANKRUPT = "registry_claim_on_bankrupt"
     NOMINAL_UNVERIFIED = "nominal_unverified"
     CURRENT_PRICE_UNAVAILABLE = "current_price_unavailable"
+    DEBTOR_INVALID = "debtor_invalid"
+    DEBTOR_PENDING_EXCLUSION = "debtor_pending_exclusion"
 
 
 class Gap(StrEnum):
     DEBTOR_INN_MISSING = "debtor_inn_missing"
     DEBTOR_INN_UNVERIFIED = "debtor_inn_unverified"
+    DEBTOR_STATUS_MISSING = "debtor_status_missing"
     BO_MISSING = "bo_missing"
     KAD_MISSING = "kad_missing"
     FSSP_MISSING = "fssp_missing"

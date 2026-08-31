@@ -38,6 +38,9 @@ class DebtorPartySchema(BaseModel):
     inn: str | None = None
     name: str | None = None
     status: OrgStatus | None = None
+    invalid_address: bool = False
+    invalid_director: bool = False
+    pending_exclusion: bool = False
     address: str | None = None
     director_name: str | None = None
     revenue: Decimal | None = None
