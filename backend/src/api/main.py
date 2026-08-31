@@ -44,7 +44,7 @@ from src.models.enums import (
     PriceScheduleStatus,
     TradeStatus,
 )
-from src.runtime import start_background_tasks, stop_background_tasks
+from src.runtime import start_background_tasks, stop_background_tasks, worker_status_snapshot
 from src.schemas.lot import (
     DashboardStats,
     DebtorAssignCreate,
@@ -161,6 +161,9 @@ async def ingest_status(
                 "last_page": run.last_page,
                 "items_seen": run.items_seen,
                 "items_upserted": run.items_upserted,
+                "items_changed": run.items_changed,
+                "items_unchanged": run.items_unchanged,
+                "items_rejected": run.items_rejected,
                 "error_code": run.error_code,
                 "error_message": run.error_message,
             }
@@ -173,6 +176,16 @@ async def ingest_status(
             else None
         ),
     }
+
+
+@app.get(
+    "/api/v1/workers/status",
+    tags=["diagnostics"],
+    dependencies=[Depends(require_api_access)],
+)
+async def workers_status() -> dict[str, object]:
+    """Return process-local worker state for operational diagnostics."""
+    return {"workers": worker_status_snapshot()}
 
 
 # ── Лоты ─────────────────────────────────────────────────────────────────────

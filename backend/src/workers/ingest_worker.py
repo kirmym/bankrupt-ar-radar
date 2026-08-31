@@ -162,6 +162,49 @@ def parse_classifier(html: str) -> tuple[list[str], list[str]]:
     return codes, labels
 
 
+def _lot_score_signature(lot: Lot) -> tuple[object, ...]:
+    """Return only fields that can change a score.
+
+    Observation timestamps and source labels are operational metadata. They
+    must not invalidate an otherwise identical score on every ingest cycle.
+    """
+    return (
+        lot.start_price,
+        lot.current_price,
+        lot.cutoff_price,
+        lot.nominal_claimed,
+        lot.bundle_flag,
+        lot.is_receivable,
+        lot.price_schedule_status,
+        lot.description_text,
+    )
+
+
+def _claim_score_signature(claim: Claim) -> tuple[object, ...]:
+    """Return claim fields consumed by the scoring model."""
+    return (
+        claim.kind,
+        claim.principal,
+        claim.penalties,
+        claim.due_date,
+        claim.limitations_deadline,
+        claim.has_judgment,
+        claim.has_writ,
+        claim.enforcement_alive,
+        claim.secured,
+        claim.assignment_forbidden,
+        claim.counterclaim_risk,
+        claim.personal_claim,
+        claim.debtor_party_id,
+        claim.guarantor_party_id,
+    )
+
+
+def _mark_ingest_changed(lot: Lot, changed: bool) -> None:
+    """Attach a transient persistence marker for ImportRun counters."""
+    setattr(lot, "_ingest_changed", changed)  # noqa: B010
+
+
 async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     """Создаёт или обновляет торги + лот в БД."""
     if not card.get("efrsb_url"):
@@ -249,7 +292,12 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     result = await db.execute(lot_stmt)
     lot = result.scalar_one_or_none()
 
-    if not lot:
+    lot_is_new = lot is None
+    previous_lot_updated_at = lot.updated_at if lot is not None else None
+    previous_score_signature = _lot_score_signature(lot) if lot is not None else None
+    score_input_changed = lot_is_new
+
+    if lot is None:
         lot = Lot(trade_id=trade.id, lot_no=lot_no)
         db.add(lot)
         await db.flush()
@@ -414,6 +462,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
             db.add(claim)
             await db.flush()
+            score_input_changed = True
         elif len(claims) == 1:
             claim = claims[0]
         else:
@@ -426,6 +475,8 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             )
 
         if claim is not None:
+            previous_claim_signature = _claim_score_signature(claim)
+            claim_was_new = not claims
             if card.get("nominal_claimed") is not None:
                 claim.principal = card["nominal_claimed"]
             claim.debtor_party_id = debtor.id
@@ -433,9 +484,30 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
                 claim.has_judgment = True
             if card.get("has_writ"):
                 claim.has_writ = True
+            score_input_changed = score_input_changed or claim_was_new or (
+                previous_claim_signature != _claim_score_signature(claim)
+            )
             # Relationship changes do not update Lot.updated_at by themselves,
             # so mark its score stale until the score worker recomputes it.
-            lot.updated_at = datetime.now(UTC)
+            if score_input_changed:
+                lot.updated_at = datetime.now(UTC)
+
+    score_input_changed = score_input_changed or (
+        previous_score_signature is not None
+        and previous_score_signature != _lot_score_signature(lot)
+    )
+    if lot_is_new:
+        _mark_ingest_changed(lot, True)
+    elif score_input_changed:
+        _mark_ingest_changed(lot, True)
+    else:
+        # ``price_observed_at`` is intentionally refreshed on every source
+        # poll, but observing the same price does not require a new score.
+        # Restore the previous timestamp so dashboards and alerts do not see
+        # the whole catalog as stale between scheduled score runs.
+        if previous_lot_updated_at is not None:
+            lot.updated_at = previous_lot_updated_at
+        _mark_ingest_changed(lot, False)
 
     return trade, lot
 
@@ -629,6 +701,12 @@ async def run_efrsb_ingest() -> int:
                 if saved:
                     processed += 1
                     run.items_upserted += 1
+                    if getattr(saved[1], "_ingest_changed", True):
+                        run.items_changed += 1
+                    else:
+                        run.items_unchanged += 1
+                else:
+                    run.items_rejected += 1
                 page = int(item.get("source_page") or run.last_page or 1)
                 run.last_page = max(run.last_page, page)
                 checkpoint = await db.scalar(
@@ -705,6 +783,12 @@ async def run_cdt_ingest() -> int:
                     if saved:
                         processed += 1
                         run.items_upserted += 1
+                        if getattr(saved[1], "_ingest_changed", True):
+                            run.items_changed += 1
+                        else:
+                            run.items_unchanged += 1
+                    else:
+                        run.items_rejected += 1
                     run.last_page = processed
                     checkpoint = await db.scalar(
                         select(ImportCheckpoint).where(ImportCheckpoint.source == source_name)

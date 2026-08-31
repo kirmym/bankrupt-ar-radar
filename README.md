@@ -159,6 +159,7 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/api/v1/documents/{id}/proposal/apply` | POST | Применить подтвержденное предложение фактов (с `X-API-Key`) |
 | `/api/v1/stats` | GET | Дашборд-агрегаты (в production с `X-API-Key`) |
 | `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
+| `/api/v1/workers/status` | GET | Состояние фоновых worker-циклов (с `X-API-Key`) |
 | `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought) |
 | `/docs` | GET | Swagger UI |
 

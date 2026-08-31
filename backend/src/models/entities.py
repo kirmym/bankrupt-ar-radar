@@ -523,6 +523,9 @@ class ImportRun(Base):
     last_page: Mapped[int] = mapped_column(Integer, default=0)
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
     items_upserted: Mapped[int] = mapped_column(Integer, default=0)
+    items_changed: Mapped[int] = mapped_column(Integer, default=0)
+    items_unchanged: Mapped[int] = mapped_column(Integer, default=0)
+    items_rejected: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String(50))
     error_message: Mapped[str | None] = mapped_column(String(500))
 
