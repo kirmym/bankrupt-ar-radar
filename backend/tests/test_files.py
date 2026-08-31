@@ -364,6 +364,68 @@ async def test_etp_html_uses_cloakbrowser_for_http_200_challenge(monkeypatch: py
     assert "real page" in html
 
 
+@pytest.mark.asyncio
+async def test_etp_html_uses_cloakbrowser_after_transport_error(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+            cloakbrowser_wait_seconds=0,
+        ),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    async def browser_fetch(url: str, **kwargs) -> str:
+        assert kwargs["allowed_hosts"] == {"elektortorgi.ru"}
+        return "<html><body>browser page</body></html>"
+
+    monkeypatch.setattr("src.connectors.cloakbrowser.fetch_html_via_cloakbrowser", browser_fetch)
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        status, html = await adapter.fetch_html("https://elektortorgi.ru/trade/1/lot/1")
+    finally:
+        await adapter._client.aclose()
+    assert status == 200
+    assert "browser page" in html
+
+
+@pytest.mark.asyncio
+async def test_etp_download_uses_cloakbrowser_when_dns_validation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "src.connectors.etp_base.get_settings",
+        lambda: SimpleNamespace(
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=30,
+        ),
+    )
+    adapter = CdtAdapter()
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+
+    async def unresolved(_url: str) -> None:
+        raise ValueError("document host cannot be resolved")
+
+    async def browser_bytes(url: str, **kwargs) -> bytes:
+        assert url.endswith("/file.pdf")
+        assert kwargs["allowed_hosts"] == {"elektortorgi.ru"}
+        return b"pdf"
+
+    monkeypatch.setattr(adapter, "_validate_download_url", unresolved)
+    monkeypatch.setattr("src.connectors.cloakbrowser.fetch_bytes_via_cloakbrowser", browser_bytes)
+    try:
+        result = await adapter.download_file(
+            EtpFile(title="file", url="https://elektortorgi.ru/file.pdf", kind="other")
+        )
+    finally:
+        await adapter._client.aclose()
+    assert result == b"pdf"
+
+
 
 @pytest.mark.asyncio
 async def test_downloader_uses_cloakbrowser_after_challenge(monkeypatch: pytest.MonkeyPatch):

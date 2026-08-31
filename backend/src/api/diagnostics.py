@@ -14,6 +14,11 @@ from fastapi import APIRouter, Depends
 
 from src.api.security import require_api_access
 from src.config import get_settings
+from src.connectors.cloakbrowser import (
+    CloakBrowserError,
+    CloakBrowserHttpError,
+    fetch_html_via_cloakbrowser,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -53,7 +58,31 @@ async def _check(client: httpx.AsyncClient, name: str, url: str, critical: bool)
             "latency_ms": elapsed_ms,
             "critical": critical,
         }
-    except Exception as exc:
+    except httpx.TimeoutException as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "source": name,
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "latency_ms": elapsed_ms,
+            "state": "transport_timeout",
+            "error": type(exc).__name__,
+            "critical": critical,
+        }
+    except httpx.ConnectError as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "source": name,
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "latency_ms": elapsed_ms,
+            "state": "transport_connect",
+            "error": type(exc).__name__,
+            "critical": critical,
+        }
+    except httpx.RequestError as exc:
         elapsed_ms = int((time.monotonic() - started) * 1000)
         return {
             "source": name,
@@ -62,6 +91,64 @@ async def _check(client: httpx.AsyncClient, name: str, url: str, critical: bool)
             "status_code": None,
             "latency_ms": elapsed_ms,
             "state": "error",
+            "error": type(exc).__name__,
+            "critical": critical,
+        }
+
+
+async def _check_browser(name: str, url: str, critical: bool) -> dict:
+    """Check the configured browser fallback without hiding direct failures."""
+    started = time.monotonic()
+    cdp_url = getattr(get_settings(), "cloakbrowser_cdp_url", "")
+    if not cdp_url:
+        return {
+            "source": name,
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "latency_ms": 0,
+            "state": "not_configured",
+            "critical": critical,
+        }
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    try:
+        html = await fetch_html_via_cloakbrowser(
+            url,
+            cdp_url=cdp_url,
+            timeout_seconds=int(getattr(get_settings(), "cloakbrowser_timeout_seconds", 30)),
+            wait_seconds=0,
+            allowed_hosts={host},
+        )
+        return {
+            "source": name,
+            "url": url,
+            "ok": bool(html),
+            "status_code": 200 if html else None,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "state": "ok" if html else "empty",
+            "critical": critical,
+        }
+    except CloakBrowserHttpError as exc:
+        return {
+            "source": name,
+            "url": url,
+            "ok": False,
+            "status_code": exc.status_code,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "state": "http_error",
+            "error": type(exc).__name__,
+            "critical": critical,
+        }
+    except CloakBrowserError as exc:
+        return {
+            "source": name,
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "state": "browser_error",
             "error": type(exc).__name__,
             "critical": critical,
         }
@@ -79,10 +166,23 @@ async def check_sources() -> dict:
             *(_check(client, name, url, critical) for name, url, critical in SOURCES)
         )
 
-    blocked = [r["source"] for r in results if r["critical"] and not r["ok"]]
+    browser_results: list[dict] = []
+    if getattr(settings, "cloakbrowser_cdp_url", ""):
+        from src.connectors.efrsb import public_search_url
+
+        browser_results.append(
+            await _check_browser("efrsb_browser", public_search_url(), True)
+        )
+    browser_ok = {r["source"][:-8]: r["ok"] for r in browser_results if r["source"].endswith("_browser")}
+    blocked = [
+        r["source"]
+        for r in results
+        if r["critical"] and not r["ok"] and not browser_ok.get(r["source"], False)
+    ]
     return {
         "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "all_critical_ok": not blocked,
         "blocked_critical": blocked,
         "results": results,
+        "browser_results": browser_results,
     }

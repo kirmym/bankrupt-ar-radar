@@ -10,6 +10,7 @@ class BotSettings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""
     telegram_allowed_user_ids: str = ""
+    bot_public: bool = False
     api_base_url: str = "http://backend:8000"
     api_auth_token: str = ""
 

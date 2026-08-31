@@ -93,17 +93,24 @@ class EtpAdapter(ABC):
         """Fetch an ETP page, falling back to a configured CloakBrowser profile."""
         if not self._client:
             raise RuntimeError("Adapter not initialized")
-        resp = await self._client.get(url, follow_redirects=False)
+        try:
+            resp = await self._client.get(url, follow_redirects=False)
+        except httpx.RequestError as exc:
+            return await self._fetch_html_via_browser(url, f"transport={type(exc).__name__}")
         from src.connectors.cloakbrowser import CHALLENGE_MARKERS
 
         has_challenge = any(marker in resp.text[:5000].lower() for marker in CHALLENGE_MARKERS)
-        if resp.status_code not in (401, 403, 429) and not has_challenge:
+        if resp.status_code not in (401, 403, 429) and resp.status_code < 500 and not has_challenge:
             return resp.status_code, resp.text
+
+        return await self._fetch_html_via_browser(url, f"status={resp.status_code}")
+
+    async def _fetch_html_via_browser(self, url: str, reason: str) -> tuple[int, str]:
+        """Load an ETP page through the configured browser fallback."""
 
         cdp_url = getattr(get_settings(), "cloakbrowser_cdp_url", "")
         if not cdp_url:
-            status = resp.status_code if resp.status_code in (401, 403, 429) else 200
-            raise EtpAccessError(f"ETP access status={status}")
+            raise EtpAccessError(f"ETP browser fallback unavailable ({reason})")
         from src.connectors.cloakbrowser import CloakBrowserError, fetch_html_via_cloakbrowser
 
         try:
@@ -119,6 +126,33 @@ class EtpAdapter(ABC):
         return 200, html
 
     async def download_file(self, file: EtpFile) -> bytes:
+        try:
+            return await self._download_file_http(file)
+        except httpx.RequestError as exc:
+            return await self._download_file_via_browser(file, f"transport={type(exc).__name__}")
+        except ValueError as exc:
+            if "document host cannot be resolved" not in str(exc):
+                raise
+            return await self._download_file_via_browser(file, "transport=dns")
+
+    async def _download_file_via_browser(self, file: EtpFile, reason: str) -> bytes:
+        cdp_url = getattr(get_settings(), "cloakbrowser_cdp_url", "")
+        if not cdp_url:
+            raise EtpAccessError(f"ETP browser fallback unavailable ({reason})")
+        from src.connectors.cloakbrowser import CloakBrowserError, fetch_bytes_via_cloakbrowser
+
+        try:
+            return await fetch_bytes_via_cloakbrowser(
+                file.url,
+                cdp_url=cdp_url,
+                timeout_seconds=int(getattr(get_settings(), "cloakbrowser_timeout_seconds", 90)),
+                allowed_hosts=self.allowed_hosts,
+                max_bytes=self.max_file_bytes,
+            )
+        except CloakBrowserError as exc:
+            raise EtpAccessError(f"CloakBrowser fallback failed: {exc}") from exc
+
+    async def _download_file_http(self, file: EtpFile) -> bytes:
         """Download a bounded file from an allowed public host."""
         if not self._client:
             raise RuntimeError("Adapter not initialized")

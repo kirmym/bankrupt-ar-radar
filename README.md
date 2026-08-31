@@ -27,6 +27,7 @@
    | `APP_ENV` | `production` |
    | `ENABLE_WORKERS` | `true` |
    | `ENABLE_BOT` | `false` |
+   | `BOT_PUBLIC` | `false` (включать только при сознательно публичном боте) |
    | `TELEGRAM_BOT_TOKEN` | токен от @BotFather (для алертов) |
    | `TELEGRAM_CHAT_IDS` | ваш chat_id |
    | `API_AUTH_TOKEN` | секрет `X-API-Key` для feedback и диагностики |
@@ -52,13 +53,13 @@ Railway — зарубежный хостинг. Российские госре
 
 ```bash
 # 1. Инфраструктура (только Postgres)
-docker compose up -d postgres
+pwsh ./scripts/dev-up.ps1
 
 # 2. Backend
 cd backend
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-cp ../.env.example ../.env   # при необходимости поправить DATABASE_URL
+Copy-Item ../.env.example ../.env -ErrorAction SilentlyContinue   # PowerShell; существующий файл сначала проверьте вручную
 alembic upgrade head
 uvicorn src.api.main:app --reload --port 8000
 # фоновые воркеры стартуют сами внутри API-процесса
@@ -70,6 +71,9 @@ npm run dev            # http://localhost:5173 (проксирует /api на :
 
 # Прод-сборка фронта через Vite, затем раздача статики из FastAPI:
 # npm run build && cd .. && docker compose up --build app
+
+# Полный smoke-тест Docker + PostgreSQL + API:
+pwsh ./scripts/smoke.ps1
 ```
 
 ## Доменная модель
@@ -145,11 +149,11 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | Endpoint | Метод | Описание |
 |---|---|---|
 | `/health` | GET | Проверка |
-| `/api/v1/lots` | GET | Лента лотов с фильтрами |
-| `/api/v1/lots/{id}` | GET | Карточка лота |
+| `/api/v1/lots` | GET | Лента лотов с фильтрами (в production с `X-API-Key`) |
+| `/api/v1/lots/{id}` | GET | Карточка лота (в production с `X-API-Key`) |
 | `/api/v1/lots/{id}/debtor` | PUT | Ручная привязка ИНН дебитора (с `X-API-Key`) |
 | `/api/v1/documents/{id}/proposal/apply` | POST | Применить подтвержденное предложение фактов (с `X-API-Key`) |
-| `/api/v1/stats` | GET | Дашборд-агрегаты |
+| `/api/v1/stats` | GET | Дашборд-агрегаты (в production с `X-API-Key`) |
 | `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
 | `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought) |
 | `/docs` | GET | Swagger UI |
@@ -164,13 +168,21 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 
 ## CloakBrowser fallback
 
-Обычный HTTP-парсер используется первым. При `401`, `403` или `429` ЕФРСБ и поддержанные ЭТП помечаются как challenge и, если задан `CLOAKBROWSER_CDP_URL`, повторяются через уже запущенный профиль CloakBrowser по CDP. Профиль должен быть доступен воркеру и может потребовать ручного прохождения капчи. Проект не решает капчи автоматически и не подменяет домены или allowlist источников. В Docker-образе клиент `playwright` устанавливается автоматически; при локальном запуске его нужно установить в окружение воркера отдельно.
+Обычный HTTP-парсер используется первым. При `401`, `403`, `429`, сетевой ошибке или challenge ЕФРСБ и поддержанные ЭТП повторяются через уже запущенный профиль CloakBrowser по CDP. Профиль должен быть доступен воркеру и может потребовать ручного прохождения капчи. Проект не решает капчи автоматически и не подменяет домены или allowlist источников. HTTP-статусы 4xx/5xx и страницы `404` не маскируются под ошибку разметки. В Docker-образе клиент `playwright` устанавливается автоматически; при локальном запуске его нужно установить в окружение воркера отдельно.
+
+Для локального автозапуска CloakBrowser (Windows Task Scheduler):
+
+```powershell
+pwsh ./scripts/register-cloakbrowser-task.ps1
+# удалить задачу:
+Unregister-ScheduledTask -TaskName BankruptAR-CloakBrowser -Confirm:$false
+```
 
 ## Источники данных
 
 | Источник | Что | Статус |
 |---|---|---|
-| ЕФРСБ (публичный HTML) | торги публичного предложения | ✅ разрешённый парсер; API не требуется; CloakBrowser fallback при challenge |
+| ЕФРСБ (legacy публичный HTML) | торги публичного предложения | ✅ `old.bankrot.fedresurs.ru/TradeList.aspx` + `TradeCard.aspx`; API не требуется; CloakBrowser fallback |
 | ЕГРЮЛ/ЕГРИП | статус, директор, ОГРН | ✅ HTML parser; бесплатный API используется только при явном разрешении |
 | ГИР БО (bo.nalog.ru) | выручка, чистые активы | 🚧 v0 |
 | КАД (kad.arbitr.ru) | дела, банкротство дебитора | ✅ HTML parser; API только при явном разрешении |

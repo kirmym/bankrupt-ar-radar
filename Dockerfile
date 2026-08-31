@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # ── Stage 2: backend + статика ───────────────────────────────────────────────
-FROM ghcr.io/astral-sh/uv:0.6.5 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
 
 FROM python:3.12-slim
 

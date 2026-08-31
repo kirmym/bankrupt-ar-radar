@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""
 
-    efrsb_public_url: str = "https://bankrot.fedresurs.ru"
+    efrsb_public_url: str = "https://old.bankrot.fedresurs.ru"
     # CDP endpoint already opened in CloakBrowser; optional challenge fallback.
     cloakbrowser_cdp_url: str = ""
     cloakbrowser_timeout_seconds: int = 90

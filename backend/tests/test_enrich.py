@@ -40,6 +40,45 @@ async def test_egrul_html_parser_sets_active_status(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_html_parser_uses_browser_on_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.connectors import enrich
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            raise enrich.httpx.ConnectError("offline")
+
+    monkeypatch.setattr(
+        enrich,
+        "get_settings",
+        lambda: SimpleNamespace(
+            free_api_sources_list=set(),
+            cloakbrowser_cdp_url="http://127.0.0.1:9222",
+            cloakbrowser_timeout_seconds=5,
+            cloakbrowser_wait_seconds=0,
+        ),
+    )
+    monkeypatch.setattr(enrich.httpx, "AsyncClient", lambda **_kwargs: FailingClient())
+    calls: list[tuple[str, str]] = []
+
+    async def browser_html(url: str, **kwargs) -> str:
+        calls.append((url, kwargs["cdp_url"]))
+        return "<html><body>ok</body></html>"
+
+    monkeypatch.setattr(enrich, "fetch_html_via_cloakbrowser", browser_html)
+
+    result = await enrich._fetch_html("https://egrul.nalog.ru/index.html?query=7707083893")
+
+    assert result == "<html><body>ok</body></html>"
+    assert calls == [("https://egrul.nalog.ru/index.html?query=7707083893", "http://127.0.0.1:9222")]
+
+
+@pytest.mark.asyncio
 async def test_fssp_parser_is_used_when_api_is_not_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.connectors import enrich
 

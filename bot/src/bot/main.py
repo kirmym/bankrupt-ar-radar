@@ -73,29 +73,31 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
         headers = {"X-API-Key": settings.api_auth_token} if settings.api_auth_token else {}
         lots: list[dict] = []
         for score_class in ("A", "B"):
-            resp = await client.get(
-                f"{base_url.rstrip('/')}/api/v1/lots",
-                params={
-                    "page": 1,
-                    "page_size": limit,
-                    "min_ev": 0,
-                    "score_class": score_class,
-                    "price_status": "parsed",
-                    "trade_status": "in_progress",
-                },
-                headers=headers,
-            )
-            resp.raise_for_status()
-            payload = ApiLotList.model_validate(resp.json())
-            lots.extend(item.model_dump(mode="json") for item in payload.items)
+            for trade_status in ("announced", "applications_open", "in_progress"):
+                resp = await client.get(
+                    f"{base_url.rstrip('/')}/api/v1/lots",
+                    params={
+                        "page": 1,
+                        "page_size": limit,
+                        "min_ev": 0,
+                        "score_class": score_class,
+                        "price_status": "parsed",
+                        "trade_status": trade_status,
+                    },
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                payload = ApiLotList.model_validate(resp.json())
+                lots.extend(item.model_dump(mode="json") for item in payload.items)
         active = [
             lot
             for lot in lots
             if lot.get("price_schedule_status") == "parsed"
             and lot.get("current_price") is not None
         ]
+        unique = {int(lot["id"]): lot for lot in active if lot.get("id") is not None}
         return sorted(
-            active,
+            unique.values(),
             key=lambda lot: Decimal(str(lot.get("score_ev") or 0)),
             reverse=True,
         )[:limit]
@@ -103,7 +105,9 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
 
 def _is_allowed(message: types.Message) -> bool:
     allowed = settings.telegram_allowed_user_ids_list
-    return not allowed or bool(message.from_user and message.from_user.id in allowed)
+    if allowed:
+        return bool(message.from_user and message.from_user.id in allowed)
+    return settings.bot_public
 
 
 async def send_alert(bot: Bot, chat_id: str, lot: dict) -> None:

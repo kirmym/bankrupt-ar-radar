@@ -78,6 +78,26 @@ async def is_receivable_lot(
     return False
 
 
+def _legacy_trade_status(props: dict[str, str]) -> str | None:
+    """Map legacy TradeCard status labels to the internal trade enum."""
+    text = " ".join(props.values()).lower()
+    mapping = (
+        ("открыт прием заявок", TradeStatus.APPLICATIONS_OPEN.value),
+        ("прием заявок завершен", TradeStatus.IN_PROGRESS.value),
+        ("идут торги", TradeStatus.IN_PROGRESS.value),
+        ("завершенн", TradeStatus.COMPLETED.value),
+        ("аннулирован", TradeStatus.CANCELLED.value),
+        ("торги отменен", TradeStatus.CANCELLED.value),
+        ("торги не состоял", TradeStatus.DID_NOT_TAKE_PLACE.value),
+        ("торги приостанов", TradeStatus.SUSPENDED.value),
+        ("объявлены торги", TradeStatus.ANNOUNCED.value),
+    )
+    for marker, status in mapping:
+        if marker in text:
+            return status
+    return None
+
+
 def classify_price_schedule(
     intervals: list[dict], now: datetime | None = None
 ) -> str:
@@ -161,6 +181,10 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         )
         db.add(trade)
         await db.flush()
+
+    trade_status = card.get("trade_status")
+    if trade_status in {item.value for item in TradeStatus}:
+        trade.status = trade_status
 
     for field in (
         "efrsb_trade_guid",
@@ -478,7 +502,7 @@ async def run_ingest() -> int:
                             item.get("url"),
                             type(exc).__name__,
                         )
-                start_price = parse_price(item.get("price_text") or "")
+                start_price = detail.get("start_price") or parse_price(item.get("price_text") or "")
                 nominal = next(
                     (
                         parse_price(value)
@@ -545,6 +569,7 @@ async def run_ingest() -> int:
                         {
                             "description_html": detail.get("description_html"),
                             "price_reduction_html": detail.get("price_reduction_html"),
+                            "current_price": detail.get("current_price"),
                             "cutoff_price": cutoff_price,
                             "deposit_amount": None if "%" in deposit_text else deposit_value,
                             "deposit_percent": deposit_value if "%" in deposit_text else None,
@@ -555,6 +580,7 @@ async def run_ingest() -> int:
                             "trade_id_on_etp": detail.get("trade_id_on_etp") or item.get("trade_id_on_etp"),
                             "etp_name": detail.get("etp_name") or item.get("etp_name"),
                             "etp_inn": detail.get("etp_inn") or item.get("etp_inn"),
+                            "trade_status": _legacy_trade_status(props),
                             "is_receivable": await is_receivable_lot(
                                 classifier_codes, classifier_labels, description, title
                             ),

@@ -23,17 +23,18 @@ settings = get_settings()
 
 
 def alert_dedupe_key(lot: Lot, chat_id: str, dedupe_hours: int, now: datetime) -> str:
-    """Create one idempotency key per recipient, score revision and time window."""
-    window_seconds = max(1, dedupe_hours * 60 * 60)
-    bucket = int(now.timestamp()) // window_seconds
+    """Create a stable idempotency key per recipient and lot revision.
+
+    The exact time window is enforced against ``sent_at`` in
+    :func:`reserve_alert_delivery`; embedding a wall-clock bucket here could
+    allow two messages a few seconds apart at a bucket boundary.
+    """
+    del dedupe_hours, now
     version = lot.score_version or "unversioned"
     revision = lot.score_updated_at.isoformat() if lot.score_updated_at else "unscored"
     price = str(lot.current_price) if lot.current_price is not None else "none"
     deadline = lot.current_interval_to.isoformat() if lot.current_interval_to else "none"
-    return (
-        f"lot:{lot.id}:chat:{chat_id}:score:{version}:{revision}:"
-        f"price:{price}:deadline:{deadline}:window:{bucket}"
-    )
+    return f"lot:{lot.id}:chat:{chat_id}:score:{version}:{revision}:price:{price}:deadline:{deadline}"
 
 
 async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: int) -> int | None:
@@ -44,16 +45,30 @@ async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: 
     """
     now = datetime.now(UTC)
     key = alert_dedupe_key(lot, chat_id, dedupe_hours, now)
+    cutoff = now - timedelta(hours=max(0, dedupe_hours))
     existing = await session.scalar(
         select(AlertState)
-        .where(AlertState.dedupe_key == key)
+        .where(
+            or_(
+                AlertState.dedupe_key == key,
+                AlertState.dedupe_key.like(f"{key}:window:%"),
+            )
+        )
+        .where(AlertState.lot_id == lot.id, AlertState.chat_id == chat_id)
         .with_for_update(skip_locked=True)
     )
     if existing is not None:
-        if existing.status == AlertDeliveryStatus.SENT.value:
+        last_activity = existing.sent_at or existing.alerted_at
+        if (
+            existing.status == AlertDeliveryStatus.SENT.value
+            and last_activity is not None
+            and last_activity >= cutoff
+        ):
             return None
         if existing.lease_until is not None and existing.lease_until > now:
             return None
+        existing.dedupe_key = key
+        existing.alerted_at = now
         existing.status = AlertDeliveryStatus.SENDING.value
         existing.lease_until = now + timedelta(minutes=5)
         existing.attempts = int(existing.attempts or 0) + 1

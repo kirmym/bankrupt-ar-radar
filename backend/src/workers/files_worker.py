@@ -51,8 +51,9 @@ class EfrsbDocumentAdapter(EtpAdapter):
     def __init__(self, timeout: float = 30.0):
         super().__init__(timeout)
         configured_host = (urlparse(get_settings().efrsb_public_url).hostname or "").lower()
-        if configured_host:
-            self.allowed_hosts = {configured_host}
+        self.allowed_hosts = {
+            host for host in {configured_host, "bankrot.fedresurs.ru", "old.bankrot.fedresurs.ru"} if host
+        }
 
     async def fetch_lot(self, etp_trade_id: str, lot_no: int):
         raise NotImplementedError
@@ -73,7 +74,7 @@ def adapter_for_document_url(url: str):
 
         return SberbankAdapter
     configured_efrsb_host = (urlparse(get_settings().efrsb_public_url).hostname or "").lower()
-    if configured_efrsb_host and host == configured_efrsb_host:
+    if host in {configured_efrsb_host, "bankrot.fedresurs.ru", "old.bankrot.fedresurs.ru"}:
         return EfrsbDocumentAdapter
     return None
 

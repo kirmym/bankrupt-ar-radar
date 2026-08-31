@@ -14,8 +14,10 @@ from src.connectors.efrsb import (
     extract_debtor_inn,
     extract_inn,
     extract_ogrn,
+    parse_legacy_public_offers,
     parse_lot_card,
     parse_price_intervals,
+    public_search_url,
     search_public_offers,
 )
 
@@ -79,6 +81,82 @@ def test_extract_debtor_inn_empty():
 def test_extract_debtor_inn_no_match():
     text = "Просто текст без цифр"
     assert extract_debtor_inn(text, None) is None
+
+
+def test_public_search_url_uses_legacy_trade_list_for_old_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.connectors.efrsb.get_settings",
+        lambda: SimpleNamespace(efrsb_public_url="https://old.bankrot.fedresurs.ru"),
+    )
+    assert public_search_url() == "https://old.bankrot.fedresurs.ru/TradeList.aspx"
+
+
+def test_legacy_trade_list_parser_extracts_public_offer_rows() -> None:
+    html = """
+    <table id="trade-list">
+      <tr><th>Номер торгов</th><th>Дата торгов</th><th>Должник</th><th>Вид торгов</th><th>Статус</th></tr>
+      <tr>
+        <td><a href="/TradeCard.aspx?ID=91c40da1-20c7-46f5-ad14-ab8b20bce52c">333593</a></td>
+        <td>27.04.2026 11:00</td><td>ООО Ромашка</td>
+        <td>Публичное предложение</td><td>Объявлены торги</td>
+      </tr>
+      <tr>
+        <td><a href="/TradeCard.aspx?ID=aaaaaaaa-20c7-46f5-ad14-ab8b20bce52c">333594</a></td>
+        <td>27.04.2026 11:00</td><td>ООО Завод</td>
+        <td>Открытый аукцион</td><td>Объявлены торги</td>
+      </tr>
+    </table>
+    """
+    result = parse_legacy_public_offers(
+        html,
+        "https://old.bankrot.fedresurs.ru",
+        page=2,
+        per_page=50,
+    )
+    assert len(result) == 1
+    assert result[0]["url"].endswith("TradeCard.aspx?ID=91c40da1-20c7-46f5-ad14-ab8b20bce52c")
+    assert result[0]["trade_number"] == "333593"
+    assert result[0]["trade_status_label"] == "Объявлены торги"
+    assert result[0]["source_page"] == 2
+
+
+def test_legacy_trade_list_parser_accepts_configured_route_url() -> None:
+    html = """
+    <table><tr><td>Публичное предложение</td><td>
+      <a href="/TradeCard.aspx?ID=abc-123">Лот 1</a>
+    </td></tr></table>
+    """
+    result = parse_legacy_public_offers(
+        html,
+        "https://old.bankrot.fedresurs.ru/TradeList.aspx",
+    )
+    assert result[0]["url"] == "https://old.bankrot.fedresurs.ru/TradeCard.aspx?ID=abc-123"
+
+
+@pytest.mark.asyncio
+async def test_legacy_public_offer_search_uses_trade_type_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.connectors.efrsb.get_settings",
+        lambda: SimpleNamespace(efrsb_public_url="https://old.bankrot.fedresurs.ru"),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/TradeList.aspx"
+        assert request.url.params["TradeType"] == "PublicOffer"
+        return httpx.Response(
+            200,
+            text=(
+                '<table><tr><td><a href="/TradeCard.aspx?ID=91c40da1-20c7-46f5-ad14-ab8b20bce52c">'
+                "333593</a></td><td>Публичное предложение</td><td>Объявлены торги</td></tr></table>"
+            ),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await search_public_offers(client=client)
+    assert result[0]["trade_number"] == "333593"
 
 
 @pytest.mark.asyncio
@@ -281,6 +359,32 @@ def test_parse_lot_card_exposes_price_reduction_and_lot_number():
     assert result["lot_no"] == 42
     assert result["price_reduction_html"]
     assert result["price_intervals"][0]["price"] == Decimal("10000")
+
+
+def test_legacy_trade_card_extracts_subject_price_and_interval_schedule() -> None:
+    result = parse_lot_card(
+        """
+        <html><body>
+          <h1>Карточка торгов</h1>
+          <table>
+            <tr><th>Вид торгов</th><td>Публичное предложение</td></tr>
+            <tr><th>Предмет торгов</th><td>Право требования к ООО Ромашка ИНН 7707083893</td></tr>
+            <tr><th>Начальная цена, руб.</th><td>1 765 953,90</td></tr>
+            <tr><th>Статус торгов</th><td>Открыт прием заявок</td></tr>
+          </table>
+          <h2>Лот № 1</h2>
+          <table>
+            <tr><th>Дата начала приема заявок на интервале</th><th>Дата окончания интервала</th><th>Цена на интервале, руб.</th></tr>
+            <tr><td>01.01.2026 00:00</td><td>03.01.2026 00:00</td><td>1 000 000,00</td></tr>
+          </table>
+        </body></html>
+        """,
+        "https://old.bankrot.fedresurs.ru/TradeCard.aspx?ID=1",
+    )
+    assert result["lot_no"] == 1
+    assert result["description"].startswith("Право требования")
+    assert result["start_price"] == Decimal("1765953.90")
+    assert result["price_intervals"][0]["price"] == Decimal("1000000.00")
 
 
 def test_parse_lot_card_connects_etp_and_documents():

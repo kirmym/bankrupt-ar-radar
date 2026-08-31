@@ -16,6 +16,8 @@ ar-radar-bot = "src.bot.main:main"
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
     "ruff>=0.7.0",
     "mypy>=1.11.0",
 ]

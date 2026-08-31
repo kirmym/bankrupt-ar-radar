@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        run: pip install uv
+        run: pip install uv==0.12.7
 
       - name: Install deps
         run: uv sync --locked --extra dev
@@ -73,7 +73,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        run: pip install uv
+        run: pip install uv==0.12.7
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
@@ -83,6 +83,9 @@ jobs:
 
       - name: Type check
         run: uv run mypy src/
+
+      - name: Tests
+        run: uv run pytest -q
 
   docker:
     runs-on: ubuntu-latest
@@ -113,3 +116,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Tests
+        run: npm test

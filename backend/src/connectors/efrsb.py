@@ -26,8 +26,34 @@ class SourceParseError(RuntimeError):
     """The source responded but its public markup no longer matches the parser."""
 
 
+LEGACY_EFRSB_HOSTS = frozenset({"old.bankrot.fedresurs.ru", "test.fedresurs.ru"})
+
+
+def _is_legacy_efrsb_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (parsed.hostname or "").lower() in LEGACY_EFRSB_HOSTS or parsed.path.lower().endswith(
+        "/tradelist.aspx"
+    )
+
+
+def _configured_origin(url: str) -> str:
+    """Return the configured source origin without a route suffix.
+
+    Operators may set ``EFRSB_PUBLIC_URL`` either to the legacy host or to the
+    complete ``TradeList.aspx`` route.  URL-joining card links against the
+    latter as a directory produces ``TradeList.aspx/TradeCard.aspx``.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url.rstrip("/")
+
+
 def public_search_url() -> str:
-    return f"{get_settings().efrsb_public_url.rstrip('/')}/publications/public/offer"
+    base_url = get_settings().efrsb_public_url.rstrip("/")
+    if _is_legacy_efrsb_url(base_url):
+        return base_url if base_url.lower().endswith("/tradelist.aspx") else f"{base_url}/TradeList.aspx"
+    return f"{base_url}/publications/public/offer"
 
 
 # ── Паттерны ─────────────────────────────────────────────────────────────────
@@ -286,11 +312,15 @@ def parse_lot_card(html: str, url: str) -> dict:
     tree = HTMLParser(html)
 
     title = ""
-    title_el = tree.css_first("h1")
+    title_el = tree.css_first("h1, h2, .page-title, .trade-title")
     if title_el:
         title = title_el.text()
 
-    # Описание — основной текст
+    body_el = tree.body
+    body_text = body_el.text(separator=" ", strip=True) if body_el else ""
+
+    # Описание — основной текст. Legacy TradeCard stores the subject in a
+    # key/value table rather than a dedicated description class.
     description = ""
     desc_el = tree.css_first('[class*="description"], [class*="content"], .notice-body')
     if desc_el:
@@ -298,21 +328,40 @@ def parse_lot_card(html: str, url: str) -> dict:
 
     # Таблица свойств
     props: dict[str, str] = {}
-    rows = tree.css("table.props tr, .props-row")
+    rows = tree.css("table.props tr, .props-row, tr")
     for row in rows:
-        cells = row.css("td, .cell")
+        cells = row.css("th, td, .cell")
         if len(cells) >= 2:
             key = cells[0].text().strip().rstrip(":")
             val = " ".join(c.text().strip() for c in cells[1:])
-            props[key] = val
+            if key and key not in props:
+                props[key] = val
+
+    if not description:
+        description = next(
+            (
+                value
+                for key, value in props.items()
+                if any(marker in key.lower() for marker in ("предмет торгов", "описание"))
+            ),
+            "",
+        )
 
     reduction_el = tree.css_first(
         ".price-reduction, .priceReduction, [class*='price-reduction'], [class*='reduction']"
     )
+    if reduction_el is None:
+        for candidate in tree.css("table"):
+            candidate_text = candidate.text().lower()
+            if "цена на интервале" in candidate_text or "величина снижения" in candidate_text:
+                reduction_el = candidate
+                break
     price_reduction_html = ""
     if reduction_el:
         price_reduction_html = getattr(reduction_el, "html", "") or reduction_el.text()
-    lot_match = re.search(r"(?:лот|lot)\s*№?\s*(\d+)", f"{title} {description}", re.IGNORECASE)
+    lot_match = re.search(
+        r"(?:лот|lot)\s*№?\s*(\d+)", f"{title} {description} {body_text}", re.IGNORECASE
+    )
     documents: list[dict[str, str]] = []
     etp_url: str | None = None
     etp_host: str | None = None
@@ -359,6 +408,23 @@ def parse_lot_card(html: str, url: str) -> dict:
     if not (title.strip() or description.strip() or props or price_reduction_html or lot_match or documents):
         raise SourceParseError("lot card markers were not found")
 
+    start_price = next(
+        (
+            parse_price(value)
+            for key, value in props.items()
+            if "начальн" in key.lower() and parse_price(value) is not None
+        ),
+        None,
+    )
+    current_price = next(
+        (
+            parse_price(value)
+            for key, value in props.items()
+            if ("текущ" in key.lower() or "итогов" in key.lower())
+            and parse_price(value) is not None
+        ),
+        None,
+    )
     return {
         "title": title,
         "description": description,
@@ -366,6 +432,8 @@ def parse_lot_card(html: str, url: str) -> dict:
         "price_reduction_html": price_reduction_html,
         "price_intervals": parse_price_intervals(price_reduction_html),
         "lot_no": int(lot_match.group(1)) if lot_match else None,
+        "start_price": start_price,
+        "current_price": current_price,
         "props": props,
         "url": url,
         "documents": documents,
@@ -416,11 +484,145 @@ async def fetch_page(url: str, timeout: float = 30.0) -> str:
                 continue
             if resp.status_code in (401, 403, 429):
                 return await _fetch_via_cloakbrowser(current, timeout)
+            if resp.status_code >= 500:
+                return await _fetch_via_cloakbrowser(current, timeout)
+            if resp.status_code == 404:
+                raise SourceAccessError(f"source endpoint status=404: {current}")
             resp.raise_for_status()
             if any(marker in resp.text[:5000].lower() for marker in _challenge_markers()):
                 return await _fetch_via_cloakbrowser(current, timeout)
             return resp.text
     raise SourceAccessError("source redirect limit exceeded")
+
+
+def _legacy_trade_anchor(anchor) -> bool:
+    href = (anchor.attrs.get("href") or "").lower()
+    if "tradecard.aspx" not in href:
+        return False
+    parsed = urlparse(href)
+    query = parse_qs(parsed.query)
+    return bool(query.get("id") or query.get("tradeid") or query.get("trade_id"))
+
+
+def _legacy_trade_row(anchor):
+    parent = anchor.parent
+    for _ in range(6):
+        if parent is None:
+            return anchor
+        if len(parent.css("td, th")) >= 2:
+            return parent
+        parent = parent.parent
+    return anchor
+
+
+def parse_legacy_public_offers(
+    html: str,
+    base_url: str,
+    *,
+    page: int = 1,
+    per_page: int = 50,
+) -> list[dict]:
+    """Parse the public trading table from legacy ``TradeList.aspx``.
+
+    The legacy portal renders an HTML table and links each trade to
+    ``TradeCard.aspx?ID=<guid>``.  The list does not expose a lot price, so
+    price and debtor details are completed from the card in the ingest worker.
+    Rows are filtered locally as a guard in case the server ignores the
+    public-offer form value.
+    """
+    tree = HTMLParser(html)
+    hosts = {(urlparse(base_url).hostname or "").lower()}
+    items: list[dict] = []
+    seen_urls: set[str] = set()
+    for anchor in tree.css("a[href]"):
+        if not _legacy_trade_anchor(anchor):
+            continue
+        href = anchor.attrs.get("href") or ""
+        item_url = urljoin(f"{_configured_origin(base_url)}/", href)
+        parsed_url = urlparse(item_url)
+        if parsed_url.scheme not in {"http", "https"} or (
+            parsed_url.hostname or ""
+        ).lower() not in hosts:
+            continue
+        if item_url in seen_urls:
+            continue
+        row = _legacy_trade_row(anchor)
+        cells = row.css("td, th")
+        cell_text = [" ".join(cell.text().split()) for cell in cells]
+        row_text = " ".join(value for value in cell_text if value).strip()
+        lowered = row_text.lower()
+        if "публичное предложение" not in lowered:
+            continue
+        seen_urls.add(item_url)
+
+        trade_type = next(
+            (
+                value
+                for value in (
+                    "Закрытое публичное предложение",
+                    "Публичное предложение",
+                )
+                if value.lower() in lowered
+            ),
+            "Публичное предложение",
+        )
+        status = next(
+            (
+                value
+                for value in (
+                    "Открыт прием заявок",
+                    "Прием заявок завершен",
+                    "Идут торги",
+                    "Завершенные",
+                    "Аннулированные",
+                    "Торги отменены",
+                    "Торги не состоялись",
+                    "Торги приостановлены",
+                    "Объявлены торги",
+                )
+                if value.lower() in lowered
+            ),
+            None,
+        )
+        dates = DATE_RE.findall(row_text)
+        date_text = " ".join(
+            " ".join(part for part in match if part).strip() for match in dates
+        )
+        trade_number = ""
+        query = {
+            key.lower(): values
+            for key, values in parse_qs(parsed_url.query).items()
+        }
+        for key in ("id", "tradeid", "trade_id"):
+            if query.get(key):
+                trade_number = query[key][0]
+                break
+        if anchor.text().strip():
+            trade_number = anchor.text().strip()
+
+        items.append(
+            {
+                "title": row_text or f"Торги {trade_number}".strip(),
+                "url": item_url,
+                "price_text": "",
+                "date_text": date_text,
+                "source_page": page,
+                "trade_number": trade_number,
+                "trade_type_label": trade_type,
+                "trade_status_label": status,
+                "row_text": row_text,
+            }
+        )
+        if len(items) >= max(1, per_page):
+            break
+    if not items:
+        lowered_response = html.lower()
+        if any(marker in lowered_response for marker in ("ничего не найдено", "результатов нет")):
+            return []
+        raise SourceParseError(
+            "legacy EFRSB trade rows were not found; source markup may have changed"
+        )
+    return items
 
 
 async def search_public_offers(
@@ -429,11 +631,22 @@ async def search_public_offers(
     client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
     """Ищет лоты публичного предложения через HTML или CloakBrowser fallback."""
-    params: dict[str, str | int] = {
-        "page": page,
-        "limit": per_page,
-        "type": "public_offer",
-    }
+    legacy_source = _is_legacy_efrsb_url(get_settings().efrsb_public_url)
+    params: dict[str, str | int] = (
+        {
+            "page": page,
+            "limit": per_page,
+            "type": "public_offer",
+        }
+        if not legacy_source
+        else {
+            # The old ASP.NET page may ignore query parameters, therefore the
+            # parser also filters the rendered trade type locally.
+            "page": page,
+            "PageSize": per_page,
+            "TradeType": "PublicOffer",
+        }
+    )
 
     source_url = public_search_url()
     current = source_url
@@ -464,6 +677,11 @@ async def search_public_offers(
             if resp.status_code in (401, 403, 429):
                 access_error = SourceAccessError(f"source access status={resp.status_code}")
                 break
+            if resp.status_code >= 500:
+                access_error = SourceAccessError(f"source server status={resp.status_code}")
+                break
+            if resp.status_code == 404:
+                raise SourceAccessError(f"source endpoint status=404: {current}")
             resp.raise_for_status()
             response_text = resp.text
             lowered = response_text[:5000].lower()
@@ -489,6 +707,14 @@ async def search_public_offers(
             )
         except SourceAccessError as fallback_error:
             raise access_error from fallback_error
+
+    if legacy_source:
+        return parse_legacy_public_offers(
+            response_text,
+            get_settings().efrsb_public_url.rstrip("/"),
+            page=page,
+            per_page=per_page,
+        )
 
     tree = HTMLParser(response_text)
     items: list[dict] = []

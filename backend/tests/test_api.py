@@ -11,11 +11,16 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.diagnostics import _check
-from src.api.main import safe_static_file
+from src.api.main import app, safe_static_file
 from src.api.security import require_api_access
 from src.connectors.efrsb import parse_lot_card, parse_price
 from src.models.enums import TradeKind, TradeStatus
-from src.schemas.lot import HealthResponse, LotCardSchema, TradeBriefSchema
+from src.schemas.lot import (
+    DocumentProposalUpdates,
+    HealthResponse,
+    LotCardSchema,
+    TradeBriefSchema,
+)
 from src.telegram import fmt_lot_message, fmt_money
 
 
@@ -41,6 +46,18 @@ async def test_source_diagnostics_does_not_treat_forbidden_as_success() -> None:
     assert result["ok"] is False
     assert result["state"] == "challenge"
     assert result["status_code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_source_diagnostics_classifies_connect_errors() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await _check(client, "test", "https://source.invalid", True)
+
+    assert result["ok"] is False
+    assert result["state"] == "transport_connect"
 
 
 def test_api_guard_requires_key_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,8 +100,42 @@ def test_health_response_does_not_claim_database_is_checked() -> None:
     assert health.redis == "not_used"
 
 
+def test_ingest_status_route_keeps_its_handler() -> None:
+    routes = [route for route in app.routes if getattr(route, "path", None) == "/api/v1/ingest/status"]
+    assert len(routes) == 1
+    assert routes[0].endpoint.__name__ == "ingest_status"
+
+
 def test_lot_card_schema_resolves_nested_models() -> None:
     assert LotCardSchema.model_fields["trade"].annotation.__name__ == "TradeBriefSchema"
+
+
+def test_document_proposal_schema_validates_types_and_inn_checksum() -> None:
+    proposal = DocumentProposalUpdates.model_validate(
+        {
+            "claim": {"kind": "trade_ar", "principal": "125000.00", "currency": "rub"},
+            "debtor": {"name": "ООО Ромашка", "inn": "7707083893"},
+        }
+    )
+    assert proposal.claim is not None
+    assert proposal.claim.currency == "RUB"
+    assert proposal.debtor is not None
+    assert proposal.debtor.inn == "7707083893"
+
+
+def test_document_proposal_schema_rejects_unknown_and_invalid_values() -> None:
+    with pytest.raises(ValueError):
+        DocumentProposalUpdates.model_validate(
+            {"debtor": {"inn": "7707083894"}}
+        )
+    with pytest.raises(ValueError):
+        DocumentProposalUpdates.model_validate(
+            {"claim": {"principal": -1}}
+        )
+    with pytest.raises(ValueError):
+        DocumentProposalUpdates.model_validate(
+            {"claim": {"unexpected": "value"}}
+        )
 
 
 def test_public_parser_and_money_formatter_keep_decimal_values() -> None:

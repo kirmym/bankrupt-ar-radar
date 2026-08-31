@@ -282,6 +282,62 @@ class DebtorAssignCreate(BaseModel):
     name: str | None = Field(default=None, max_length=500)
 
 
+class ClaimProposal(BaseModel):
+    """Strict, reviewable subset of facts that may be applied to a claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ClaimKind | None = None
+    principal: Decimal | None = Field(default=None, ge=0, le=10**18)
+    penalties: Decimal | None = Field(default=None, ge=0, le=10**18)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    base_contract: str | None = Field(default=None, max_length=500)
+    base_date: date | None = None
+    due_date: date | None = None
+    court_case_no: str | None = Field(default=None, max_length=50)
+    has_judgment: bool | None = None
+    has_writ: bool | None = None
+    secured: bool | None = None
+    assignment_forbidden: bool | None = None
+    counterclaim_risk: bool | None = None
+    personal_claim: bool | None = None
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_currency(cls, value: str | None) -> str | None:
+        return value.upper() if value else value
+
+
+class DebtorProposal(BaseModel):
+    """Strict debtor facts accepted from document extraction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=500)
+    inn: str | None = Field(default=None, pattern=r"^\d{10}(\d{2})?$")
+    ogrn: str | None = Field(default=None, pattern=r"^\d{13}(\d{2})?$")
+
+    @field_validator("inn")
+    @classmethod
+    def validate_inn_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from src.connectors.efrsb import is_valid_inn
+
+        if not is_valid_inn(value):
+            raise ValueError("invalid INN check digits")
+        return value
+
+
+class DocumentProposalUpdates(BaseModel):
+    """The only mutable portion of an LLM document proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim: ClaimProposal | None = None
+    debtor: DebtorProposal | None = None
+
+
 # ── Ответы ───────────────────────────────────────────────────────────────────
 
 

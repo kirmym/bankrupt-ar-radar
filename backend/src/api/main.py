@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -47,6 +48,7 @@ from src.runtime import start_background_tasks, stop_background_tasks
 from src.schemas.lot import (
     DashboardStats,
     DebtorAssignCreate,
+    DocumentProposalUpdates,
     DocumentSchema,
     FeedbackCreate,
     FeedbackSchema,
@@ -107,6 +109,23 @@ async def readiness(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, s
 app.include_router(diagnostics_router, prefix="/api/v1", tags=["diagnostics"])
 
 
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Add baseline browser hardening headers to API and SPA responses."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; connect-src 'self' https:; font-src 'self' data:",
+    )
+    if settings.app_env.lower() in {"production", "prod"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 @app.get(
     "/api/v1/ingest/status",
     tags=["diagnostics"],
@@ -155,7 +174,12 @@ async def ingest_status(
 # ── Лоты ─────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/lots", response_model=LotListSchema, tags=["lots"])
+@app.get(
+    "/api/v1/lots",
+    response_model=LotListSchema,
+    tags=["lots"],
+    dependencies=[Depends(require_api_access)],
+)
 async def list_lots(
     db: Annotated[AsyncSession, Depends(get_db)],
     page: int = Query(ge=1, default=1),
@@ -242,7 +266,12 @@ async def list_lots(
     )
 
 
-@app.get("/api/v1/lots/{lot_id}", response_model=LotCardSchema, tags=["lots"])
+@app.get(
+    "/api/v1/lots/{lot_id}",
+    response_model=LotCardSchema,
+    tags=["lots"],
+    dependencies=[Depends(require_api_access)],
+)
 async def get_lot(
     lot_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -374,10 +403,18 @@ async def apply_document_proposal(
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     payload = document.extracted_facts or {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=409, detail="Document has no fact proposal")
+    if payload.get("proposal_applied_at"):
+        return DocumentSchema.model_validate(document, from_attributes=True)
     proposal = payload.get("proposal") if isinstance(payload, dict) else None
     updates = proposal.get("updates") if isinstance(proposal, dict) else None
     if not isinstance(updates, dict):
         raise HTTPException(status_code=409, detail="Document has no fact proposal")
+    try:
+        validated_updates = DocumentProposalUpdates.model_validate(updates)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="Invalid document proposal values") from exc
 
     claim = (
         await db.execute(
@@ -392,8 +429,8 @@ async def apply_document_proposal(
     if lot is None:
         raise HTTPException(status_code=404, detail="Lot not found")
 
-    claim_updates = updates.get("claim") or {}
-    debtor_updates = updates.get("debtor") or {}
+    claim_updates = validated_updates.claim.model_dump(exclude_unset=True) if validated_updates.claim else {}
+    debtor_updates = validated_updates.debtor.model_dump(exclude_unset=True) if validated_updates.debtor else {}
     if claim is None and (claim_updates or debtor_updates):
         claim = Claim(lot_id=lot.id, kind=ClaimKind.TRADE_AR.value)
         db.add(claim)
@@ -406,11 +443,8 @@ async def apply_document_proposal(
         }
         for field, value in claim_updates.items():
             if field in allowed_claim_fields:
-                if field in {"base_date", "due_date"} and isinstance(value, str):
-                    try:
-                        value = datetime.fromisoformat(value).date()
-                    except ValueError:
-                        continue
+                if hasattr(value, "value"):
+                    value = value.value
                 setattr(claim, field, value)
 
     if claim is not None and isinstance(debtor_updates, dict):
@@ -442,7 +476,12 @@ async def apply_document_proposal(
 # ── Статистика ────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/stats", response_model=DashboardStats, tags=["stats"])
+@app.get(
+    "/api/v1/stats",
+    response_model=DashboardStats,
+    tags=["stats"],
+    dependencies=[Depends(require_api_access)],
+)
 async def get_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DashboardStats:

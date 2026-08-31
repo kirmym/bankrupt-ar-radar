@@ -14,12 +14,28 @@ class CloakBrowserError(RuntimeError):
     """The browser transport is unavailable or the challenge remains."""
 
 
+class CloakBrowserHttpError(CloakBrowserError):
+    """The browser reached a source but received an HTTP/error page."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, url: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.url = url
+
+
 CHALLENGE_MARKERS = (
     "captcha",
     "cloudflare",
     "verify you are human",
     "проверка безопасности",
     "проверка что вы не робот",
+)
+
+ERROR_PAGE_MARKERS = (
+    "страница не найдена",
+    "page not found",
+    "404 - not found",
+    "404 not found",
 )
 
 
@@ -63,11 +79,19 @@ async def fetch_html_via_cloakbrowser(
                 browser = await playwright.chromium.connect_over_cdp(cdp_url)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = await context.new_page()
-                await page.goto(
+                response = await page.goto(
                     url,
                     wait_until="domcontentloaded",
                     timeout=max(1, timeout_seconds) * 1000,
                 )
+                response_status = getattr(response, "status", None)
+                response_url = getattr(response, "url", None) or getattr(page, "url", url)
+                if isinstance(response_status, int) and response_status >= 400:
+                    raise CloakBrowserHttpError(
+                        f"browser navigation status={response_status}",
+                        status_code=response_status,
+                        url=response_url,
+                    )
                 final_url = getattr(page, "url", url)
                 if allowed_hosts and not _host_is_allowed(final_url, allowed_hosts):
                     raise CloakBrowserError("CloakBrowser navigation left the allowlist")
@@ -82,6 +106,12 @@ async def fetch_html_via_cloakbrowser(
                 except Exception:
                     pass
                 lowered = body_text[:5000].lower()
+                if any(marker in lowered for marker in ERROR_PAGE_MARKERS):
+                    raise CloakBrowserHttpError(
+                        "browser navigation returned an error page",
+                        status_code=response_status if isinstance(response_status, int) else None,
+                        url=final_url,
+                    )
                 if any(marker in lowered for marker in CHALLENGE_MARKERS):
                     raise CloakBrowserError("browser challenge is still visible")
                 return await page.content()

@@ -136,8 +136,10 @@ async def _fetch_html(
                 resp.raise_for_status()
                 return resp.text
     except Exception:
+        # A DNS/transport failure is one of the supported reasons to switch
+        # to the already authenticated CloakBrowser profile.  Do not return
+        # before reaching the fallback below.
         logger.exception("source parser request failed: %s", url)
-        return None
 
     cdp_url = getattr(settings, "cloakbrowser_cdp_url", "")
     if not cdp_url:

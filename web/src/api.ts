@@ -1,6 +1,8 @@
 /** API-клиент для бэкенда AR Radar. */
 import axios from "axios";
 
+import { API_KEY_STORAGE_KEY, canRetryApiKey, normalizeApiKey } from "./auth";
+
 const baseURL = import.meta.env.VITE_API_URL || "/api/v1";
 
 export const api = axios.create({
@@ -13,7 +15,7 @@ export const api = axios.create({
 // the current browser tab.
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    const key = window.sessionStorage.getItem("ar_radar_api_key");
+    const key = window.sessionStorage.getItem(API_KEY_STORAGE_KEY);
     if (key) {
       config.headers = config.headers ?? {};
       config.headers["X-API-Key"] = key;
@@ -21,6 +23,30 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
+
+// Protected API reads and mutations use the same one-time browser prompt.
+// Limit the retry to one attempt so an invalid key cannot recurse forever.
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const config = error?.config as
+      | (typeof error.config & { __arRadarAuthRetried?: boolean })
+      | undefined;
+    if (!canRetryApiKey(error?.response?.status, Boolean(config?.__arRadarAuthRetried))) {
+      return Promise.reject(error);
+    }
+    let key = typeof window !== "undefined" ? window.sessionStorage.getItem(API_KEY_STORAGE_KEY) : null;
+    if (!key && typeof window !== "undefined") {
+      key = normalizeApiKey(window.prompt("Введите API-ключ AR Radar"));
+      if (key) window.sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+    }
+    if (!key) return Promise.reject(error);
+    config.__arRadarAuthRetried = true;
+    config.headers = config.headers ?? {};
+    config.headers["X-API-Key"] = key;
+    return api.request(config);
+  },
+);
 
 export interface PriceInterval {
   seq: number;
