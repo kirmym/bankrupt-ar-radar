@@ -693,6 +693,7 @@ async def run_cdt_ingest() -> int:
             async with CdtPublicSource(
                 api_url=settings.cdt_api_url,
                 detail_concurrency=settings.cdt_detail_concurrency,
+                proxy_url=settings.source_proxy,
             ) as source:
                 async for card in source.iter_receivables(
                     max_pages=settings.ingest_max_pages,

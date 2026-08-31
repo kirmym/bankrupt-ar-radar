@@ -2,7 +2,15 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from src.config import Settings
 from src.connectors.cdt_source import parse_cdt_detail, parse_cdt_schedule
+
+
+def test_source_proxy_is_optional_and_trimmed() -> None:
+    assert Settings(source_proxy_url="  http://109.94.1.23:4050  ").source_proxy == (
+        "http://109.94.1.23:4050"
+    )
+    assert Settings(source_proxy_url="").source_proxy is None
 
 
 def test_parse_cdt_schedule_marks_current_interval() -> None:

@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     egrul_extract_max_polls: int = 8
     # CDP endpoint already opened in CloakBrowser; optional challenge fallback.
     cloakbrowser_cdp_url: str = ""
+    # Optional operator-provided HTTP(S) proxy for public source requests.
+    # Keep this empty by default: free public proxies are short-lived and
+    # untrusted. Telegram and OpenAI clients deliberately do not use it.
+    source_proxy_url: str = ""
+    # Proxy passed while launching the persistent CloakBrowser profile. This
+    # cannot be changed after a CDP session has already been opened.
+    cloakbrowser_proxy_url: str = ""
     cloakbrowser_timeout_seconds: int = 90
     cloakbrowser_wait_seconds: int = 8
     ingest_max_pages: int = 10
@@ -110,6 +117,12 @@ class Settings(BaseSettings):
     @property
     def ingest_sources_list(self) -> list[str]:
         return [x.strip().lower() for x in self.ingest_sources.split(",") if x.strip()]
+
+    @property
+    def source_proxy(self) -> str | None:
+        """Return a configured public-source proxy without exposing it in logs."""
+        value = self.source_proxy_url.strip()
+        return value or None
 
     @property
     def primary_ingest_source(self) -> str:

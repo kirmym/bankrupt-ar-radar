@@ -35,6 +35,7 @@ PROFILE_DIR = Path(
     os.environ.get("CLOAKBROWSER_PROFILE_DIR", str(TASK_ROOT / "runtime" / "cloakbrowser-profile"))
 )
 CDP_PORT = os.environ.get("CLOAKBROWSER_CDP_PORT", "9222")
+PROXY_URL = os.environ.get("CLOAKBROWSER_PROXY_URL", "").strip() or None
 
 
 def main() -> None:
@@ -42,6 +43,7 @@ def main() -> None:
     context = launch_persistent_context(
         str(PROFILE_DIR),
         headless=False,
+        proxy=PROXY_URL,
         args=[
             f"--remote-debugging-port={CDP_PORT}",
             "--remote-debugging-address=127.0.0.1",

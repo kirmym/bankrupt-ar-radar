@@ -40,7 +40,11 @@ async def _fetch_egrul_rows(inn: str) -> list[dict[str, object]] | None:
     for the configured CloakBrowser fallback below.
     """
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=False,
+            proxy=getattr(get_settings(), "source_proxy", None),
+        ) as client:
             search = await client.post(
                 EGRUL_PUBLIC_SEARCH_URL,
                 data={"query": inn, "region": "", "PreventChromeAutocomplete": ""},
@@ -86,7 +90,11 @@ async def _fetch_egrul_extract(row_token: str) -> str | None:
     base_url = EGRUL_PUBLIC_SEARCH_URL.rstrip("/")
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            proxy=getattr(settings, "source_proxy", None),
+        ) as client:
             requested = await client.get(f"{base_url}/vyp-request/{row_token}")
             if requested.status_code in (401, 403, 429):
                 return None
@@ -251,6 +259,7 @@ async def _fetch_html(
             timeout=15.0,
             follow_redirects=True,
             max_redirects=5,
+            proxy=getattr(settings, "source_proxy", None),
         ) as client:
             if method == "POST":
                 resp = await client.post(url, json=json_payload or {})
@@ -391,7 +400,10 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
             params = {"query": party.inn}
             if source_settings.fssp_api_token:
                 params["token"] = source_settings.fssp_api_token
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                proxy=getattr(source_settings, "source_proxy", None),
+            ) as client:
                 resp = await client.get(url, params=params)
                 if resp.status_code != 200:
                     return False
@@ -445,7 +457,10 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
             "Hearings": [],
         }
         if provider_api_enabled("kad", get_settings().free_api_sources_list, url):
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                proxy=getattr(get_settings(), "source_proxy", None),
+            ) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code != 200:
                     return False

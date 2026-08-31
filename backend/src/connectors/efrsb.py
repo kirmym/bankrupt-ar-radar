@@ -468,7 +468,11 @@ async def fetch_page(url: str, timeout: float = 30.0) -> str:
     await asyncio.sleep(0.5)  # rate limit
     source_url = get_settings().efrsb_public_url
     current = url
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        proxy=get_settings().source_proxy,
+    ) as client:
         for redirect_count in range(4):
             if urlparse(current).netloc != urlparse(source_url).netloc:
                 raise SourceAccessError("source redirect leaves configured host")
@@ -653,7 +657,11 @@ async def search_public_offers(
     response_text: str | None = None
     access_error: SourceAccessError | None = None
     own_client = client is None
-    active_client = client or httpx.AsyncClient(timeout=30.0, follow_redirects=False)
+    active_client = client or httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=False,
+        proxy=get_settings().source_proxy,
+    )
     try:
         for redirect_count in range(4):
             if urlparse(current).netloc != urlparse(get_settings().efrsb_public_url).netloc:

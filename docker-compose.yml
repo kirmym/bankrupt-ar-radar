@@ -29,6 +29,10 @@ services:
       LOG_LEVEL: INFO
       ENABLE_WORKERS: "true"
       ENABLE_BOT: "false"
+      # Optional HTTP(S) proxy for public source requests. Leave empty by
+      # default; Telegram/OpenAI clients are intentionally not routed here.
+      SOURCE_PROXY_URL: ${SOURCE_PROXY_URL:-}
+      INGEST_SOURCES: ${INGEST_SOURCES:-cdt}
     depends_on:
       postgres:
         condition: service_healthy

@@ -67,6 +67,7 @@ class EtpAdapter(ABC):
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=False,
+            proxy=get_settings().source_proxy,
             headers={"User-Agent": "AR-Radar/1.0 (EtpAdapter)"},
         )
         return self

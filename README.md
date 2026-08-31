@@ -32,7 +32,9 @@
    | `TELEGRAM_CHAT_IDS` | ваш chat_id |
    | `API_AUTH_TOKEN` | секрет `X-API-Key` для feedback и диагностики |
    | `CLOAKBROWSER_CDP_URL` | CDP endpoint запущенного профиля CloakBrowser для challenge fallback |
+   | `CLOAKBROWSER_PROXY_URL` | HTTP(S)/SOCKS proxy профиля CloakBrowser; задаётся до запуска профиля |
    | `CLOAKBROWSER_WAIT_SECONDS` | время ожидания ручного прохождения проверки |
+   | `SOURCE_PROXY_URL` | необязательный HTTP(S)-прокси только для публичных source-запросов; Telegram/OpenAI не проксируются |
    | `FREE_API_SOURCES` | только документально подтверждённые бесплатные production API; сейчас оставлять пустым |
    | `INGEST_SOURCES` | источники первичного импорта через запятую; по умолчанию `cdt`, опционально `cdt,efrsb` |
    | `CDT_INGEST_MAX_ITEMS` | лимит карточек ЦДТ за один запуск; по умолчанию `250` |

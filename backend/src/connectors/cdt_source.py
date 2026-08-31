@@ -245,10 +245,12 @@ class CdtPublicSource:
         *,
         timeout: float = 30.0,
         detail_concurrency: int = 4,
+        proxy_url: str | None = None,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.timeout = timeout
         self.detail_concurrency = max(1, min(detail_concurrency, 8))
+        self.proxy_url = proxy_url.strip() if proxy_url else None
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> CdtPublicSource:
@@ -256,6 +258,7 @@ class CdtPublicSource:
             base_url=self.api_url,
             timeout=self.timeout,
             follow_redirects=False,
+            proxy=self.proxy_url,
             headers={
                 "Accept": "application/json",
                 "Origin": CDT_SITE_URL,
