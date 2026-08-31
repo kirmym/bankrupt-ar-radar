@@ -97,12 +97,15 @@ async def health() -> HealthResponse:
 
 @app.get("/ready", tags=["system"])
 async def readiness(db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
-    """Readiness probe: the process and its database must both be usable."""
+    """Readiness probe: the database connection and required schema must be usable."""
     try:
-        await db.execute(text("SELECT 1"))
+        result = await db.execute(text("SELECT to_regclass('public.import_runs')"))
     except Exception as exc:
         logger.warning("readiness: database check failed: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="database unavailable") from exc
+    if result.scalar_one_or_none() is None:
+        logger.warning("readiness: required database schema is missing")
+        raise HTTPException(status_code=503, detail="database schema unavailable")
     return {"status": "ok", "database": "ok"}
 
 

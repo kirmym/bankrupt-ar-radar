@@ -15,6 +15,9 @@ if (-not $NoBuild) {
     $composeArgs += "--build"
 }
 & docker @composeArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "docker compose up failed with exit code $LASTEXITCODE"
+}
 
 for ($attempt = 1; $attempt -le 30; $attempt++) {
     try {
@@ -33,10 +36,15 @@ if ([int]$ready.StatusCode -ne 200) {
     throw "API health is up but readiness failed with HTTP $($ready.StatusCode): $($ready.Content)"
 }
 
+$ingestStatus = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/api/v1/ingest/status" -TimeoutSec 10
+if ([int]$ingestStatus.StatusCode -ne 200) {
+    throw "Ingest status smoke failed with HTTP $($ingestStatus.StatusCode): $($ingestStatus.Content)"
+}
+
 $openapi = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/openapi.json" -TimeoutSec 10
 if ([int]$openapi.StatusCode -ne 200) {
     throw "OpenAPI smoke failed with HTTP $($openapi.StatusCode)"
 }
 
-Write-Host "PASS: /health=200, /ready=200, /openapi.json=200"
+Write-Host "PASS: /health=200, /ready=200, /api/v1/ingest/status=200, /openapi.json=200"
 Write-Host "Стек оставлен запущенным; остановка: docker compose down"

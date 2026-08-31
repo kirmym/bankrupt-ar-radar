@@ -180,13 +180,15 @@ Unregister-ScheduledTask -TaskName BankruptAR-CloakBrowser -Confirm:$false
 
 ## Источники данных
 
+Подробная политика транспорта, результаты живой проверки и варианты размещения collector: [docs/source-access-strategy.md](docs/source-access-strategy.md).
+
 | Источник | Что | Статус |
 |---|---|---|
-| ЕФРСБ (legacy публичный HTML) | торги публичного предложения | ✅ `old.bankrot.fedresurs.ru/TradeList.aspx` + `TradeCard.aspx`; API не требуется; CloakBrowser fallback |
+| ЕФРСБ (legacy публичный HTML) | торги публичного предложения | ✅ парсер `TradeList.aspx` + `TradeCard.aspx`; доступ зависит от IP/сессии; CloakBrowser fallback |
 | ЕГРЮЛ/ЕГРИП | статус, директор, ОГРН | ✅ HTML parser; бесплатный API используется только при явном разрешении |
 | ГИР БО (bo.nalog.ru) | выручка, чистые активы | 🚧 v0 |
 | КАД (kad.arbitr.ru) | дела, банкротство дебитора | ✅ HTML parser; API только при явном разрешении |
-| ФССП (api-ip.fssprus.ru) | исполнительные производства | ✅ HTML parser; бесплатный API только при явном разрешении |
+| ФССП (fssp.gov.ru/iss/ip) | исполнительные производства | ✅ HTML parser; API только после подтверждения бесплатного production-доступа |
 | ЭТП ЦДТ, Сбербанк-АСТ | цена, deadline, файлы | ✅ (этап 2) |
 | OpenAI | LLM-факты из PDF | ✅ (опция) |
 

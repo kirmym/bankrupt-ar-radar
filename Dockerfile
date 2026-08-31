@@ -17,31 +17,31 @@ WORKDIR /app
 
 COPY --from=uv /uv /uvx /bin/
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Создаём непривилегированного пользователя до установки Python-пакетов.
+# Все зафиксированные зависимости поставляются manylinux-wheel'ами, поэтому
+# компилятор и libpq-dev в runtime-образе не нужны.
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && mkdir -p /home/app \
+    && chown app:app /app /home/app
+ENV HOME=/home/app \
+    UV_CACHE_DIR=/home/app/.cache/uv
+USER app
 
 # Lockfile is part of the production artifact: CI and deployed code receive
 # the same dependency graph.
-COPY backend/pyproject.toml backend/uv.lock backend/README.md ./
+COPY --chown=app:app backend/pyproject.toml backend/uv.lock backend/README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY backend/src ./src
+COPY --chown=app:app backend/src ./src
 RUN uv sync --frozen --no-dev
 
-# Не запускать API от root внутри контейнера.
-RUN addgroup --system app && adduser --system --ingroup app app \
-    && chown -R app:app /app
-USER app
-
 # Остальное (миграции, тесты)
-COPY backend/alembic ./alembic
-COPY backend/alembic.ini ./
-COPY backend/tests ./tests
+COPY --chown=app:app backend/alembic ./alembic
+COPY --chown=app:app backend/alembic.ini ./
+COPY --chown=app:app backend/tests ./tests
 
 # Собранный фронтенд внутрь backend-контейнера
-COPY --from=webbuilder /web/dist /app/web/dist
+COPY --chown=app:app --from=webbuilder /web/dist /app/web/dist
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.diagnostics import _check
-from src.api.main import app, safe_static_file
+from src.api.main import app, readiness, safe_static_file
 from src.api.security import require_api_access
 from src.connectors.efrsb import parse_lot_card, parse_price
 from src.models.enums import TradeKind, TradeStatus
@@ -98,6 +98,23 @@ def test_health_response_does_not_claim_database_is_checked() -> None:
     assert health.status == "ok"
     assert health.database == "not_checked"
     assert health.redis == "not_used"
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_database_without_required_schema() -> None:
+    class MissingSchemaResult:
+        def scalar_one_or_none(self) -> None:
+            return None
+
+    class MissingSchemaSession:
+        async def execute(self, _statement: object) -> MissingSchemaResult:
+            return MissingSchemaResult()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await readiness(MissingSchemaSession())  # type: ignore[arg-type]
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "database schema unavailable"
 
 
 def test_ingest_status_route_keeps_its_handler() -> None:
