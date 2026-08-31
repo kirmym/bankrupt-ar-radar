@@ -187,7 +187,7 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
             price_freshness_hours=max(1, int(getattr(settings, "price_freshness_hours", 24))),
         )
         stmt = stmt.options(
-            selectinload(Lot.trade)
+            selectinload(Lot.trade).selectinload(Trade.source_refs)
         )
         result = await session.execute(stmt)
         lots = result.scalars().all()
@@ -222,7 +222,11 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     "score_stop_factors": lot.score_stop_factors,
                     # Не отправляем имя/ИНН должника во внешний Telegram API.
                     "claims": [],
-                    "efrsb_url": lot.trade.efrsb_url if lot.trade else None,
+                    "efrsb_url": (
+                        lot.trade.source_refs[0].source_url
+                        if lot.trade and lot.trade.source_refs
+                        else lot.trade.efrsb_url if lot.trade else None
+                    ),
                 }
             )
             for chat_id in settings.telegram_chat_ids_list:

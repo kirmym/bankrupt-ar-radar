@@ -3,6 +3,15 @@ import { useParams } from "react-router-dom";
 import { feedbackApi, Lot, lotsApi } from "../api";
 import { fmtDate, fmtMoney, fmtRelative } from "../utils";
 
+function triState(value: boolean | null | undefined): {
+  label: string;
+  className: string;
+} {
+  if (value === true) return { label: "да", className: "text-red-600 font-medium" };
+  if (value === false) return { label: "нет", className: "text-emerald-600" };
+  return { label: "не проверено", className: "text-amber-600" };
+}
+
 export default function LotDetail() {
   const { id } = useParams<{ id: string }>();
   const [lot, setLot] = useState<Lot | null>(null);
@@ -103,6 +112,21 @@ export default function LotDetail() {
               Требование {index + 1} из {claims.length}
             </h2>
           )}
+          {lot.trade?.source_refs?.length ? (
+            <div className="text-xs text-slate-500 mt-2">
+              Источники: {lot.trade.source_refs.map((ref) => (
+                <a
+                  key={`${ref.source}:${ref.source_url}`}
+                  href={ref.source_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 hover:underline mr-2"
+                >
+                  {ref.source}
+                </a>
+              ))}
+            </div>
+          ) : null}
           {claim.debtor_party && <DebtorCard debtor={claim.debtor_party} />}
           <ClaimCard claim={claim} />
         </section>
@@ -205,6 +229,8 @@ function Stat({ title, value }: { title: string; value: string }) {
 }
 
 function DebtorCard({ debtor }: { debtor: NonNullable<Lot["claims"][0]["debtor_party"]> }) {
+  const kad = triState(debtor.kad_bankruptcy_open);
+  const fssp = triState(debtor.fssp_uncollectible);
   return (
     <div className="bg-white p-4 rounded shadow-sm border border-slate-200">
       <h3 className="font-semibold text-slate-900">Дебитор</h3>
@@ -255,20 +281,30 @@ function DebtorCard({ debtor }: { debtor: NonNullable<Lot["claims"][0]["debtor_p
         </div>
         <div>
           <span className="text-slate-500">Банкротство дебитора:</span>{" "}
-          <span
-            className={
-              debtor.kad_bankruptcy_open ? "text-red-600 font-medium" : "text-slate-900"
-            }
-          >
-            {debtor.kad_bankruptcy_open ? "да" : "нет"}
-          </span>
+          <span className={kad.className}>{kad.label}</span>
+        </div>
+        <div>
+          <span className="text-slate-500">Безнадёжные ИП ФССП:</span>{" "}
+          <span className={fssp.className}>{fssp.label}</span>
         </div>
       </div>
+      {debtor.source_checks?.length ? (
+        <div className="mt-3 text-xs text-slate-500">
+          Проверки источников:{" "}
+          {debtor.source_checks.map((check) => (
+            <span key={check.source} className="mr-2">
+              {check.source}: {check.status === "success" ? "успешно" : check.status}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function ClaimCard({ claim }: { claim: Lot["claims"][0] }) {
+  const judgment = triState(claim.has_judgment);
+  const writ = triState(claim.has_writ);
   return (
     <div className="bg-white p-4 rounded shadow-sm border border-slate-200">
       <h3 className="font-semibold text-slate-900">Требование</h3>
@@ -303,15 +339,11 @@ function ClaimCard({ claim }: { claim: Lot["claims"][0] }) {
         </div>
         <div>
           <span className="text-slate-500">Решение суда:</span>{" "}
-          <span className={claim.has_judgment ? "text-emerald-600" : "text-slate-500"}>
-            {claim.has_judgment ? "✅ есть" : "нет"}
-          </span>
+          <span className={judgment.className}>{judgment.label}</span>
         </div>
         <div>
           <span className="text-slate-500">Исполнительный лист:</span>{" "}
-          <span className={claim.has_writ ? "text-emerald-600" : "text-slate-500"}>
-            {claim.has_writ ? "✅ есть" : "нет"}
-          </span>
+          <span className={writ.className}>{writ.label}</span>
         </div>
         <div>
           <span className="text-slate-500">Обеспечение:</span>{" "}

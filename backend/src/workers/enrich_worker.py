@@ -5,16 +5,57 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from src.config import get_settings
 from src.connectors.enrich import enrich_party
 from src.database import async_session_factory
-from src.models.entities import Claim, Lot, Party
+from src.models.entities import Claim, Lot, Party, PartySourceCheck
 from src.models.enums import PartyRole
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+SOURCE_URLS = {
+    "egrul": "https://egrul.nalog.ru/",
+    "fssp": "https://fssp.gov.ru/",
+    "kad": "https://kad.arbitr.ru/",
+}
+
+
+async def record_source_checks(
+    session, party: Party, statuses: dict[str, bool], checked_at: datetime
+) -> None:
+    """Persist one explicit result per registry instead of overloading a flag."""
+    for source, ok in statuses.items():
+        check = (
+            await session.execute(
+                select(PartySourceCheck).where(
+                    PartySourceCheck.party_id == party.id,
+                    PartySourceCheck.source == source,
+                )
+            )
+        ).scalar_one_or_none()
+        if check is None:
+            check = PartySourceCheck(
+                party_id=party.id,
+                source=source,
+                failures=0,
+            )
+            session.add(check)
+        check.status = "success" if ok else "unavailable"
+        check.checked_at = checked_at
+        check.source_url = SOURCE_URLS.get(source)
+        if ok:
+            check.failures = 0
+            check.next_retry_at = None
+            check.last_error = None
+        else:
+            check.failures = int(check.failures or 0) + 1
+            check.next_retry_at = enrich_retry_at(
+                checked_at, check.failures, settings.enrich_max_attempts
+            )
+            check.last_error = "source returned no verified result"
 
 
 def enrich_retry_at(
@@ -43,6 +84,27 @@ async def run_enrich(batch_size: int = 50) -> int:
                 or_(
                     Party.source_as_of.is_(None),
                     Party.source_as_of < now - timedelta(days=1),
+                    Party.source_checks.any(
+                        and_(
+                            PartySourceCheck.source == "egrul",
+                            or_(
+                                PartySourceCheck.checked_at.is_(None),
+                                PartySourceCheck.next_retry_at <= now,
+                            ),
+                        )
+                    ),
+                    Party.source_checks.any(
+                        and_(
+                            PartySourceCheck.source.in_(("fssp", "kad")),
+                            or_(
+                                PartySourceCheck.checked_at.is_(None),
+                                PartySourceCheck.next_retry_at <= now,
+                            ),
+                        )
+                    ),
+                    ~Party.source_checks.any(
+                        PartySourceCheck.source.in_(("egrul", "fssp", "kad"))
+                    ),
                 )
             )
             .where(
@@ -68,6 +130,7 @@ async def run_enrich(batch_size: int = 50) -> int:
             attempt_at = datetime.now(UTC)
             try:
                 statuses = await enrich_party(debtor, session)
+                await record_source_checks(session, debtor, statuses, attempt_at)
                 if any(statuses.values()):
                     # Network calls happen outside a row lock.  Once a source
                     # returns, invalidate linked scores even when EGRUL itself
@@ -127,8 +190,9 @@ async def run_enrich(batch_size: int = 50) -> int:
         logger.info(
             "enrich: selected=%d succeeded=%d deferred=%d", len(debtors), succeeded, failed
         )
-        if debtors and failed == len(debtors):
-            raise RuntimeError("enrich: all selected debtors failed")
+        # A registry outage or challenge is an expected source result, not a
+        # worker crash: the per-source rows above keep it visible as a typed
+        # ``unavailable`` check and the next retry remains scheduled.
         return succeeded
 
 

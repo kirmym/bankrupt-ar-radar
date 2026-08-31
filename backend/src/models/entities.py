@@ -128,11 +128,49 @@ class Trade(Base):
     lots: Mapped[list[Lot]] = relationship(
         "Lot", back_populates="trade", cascade="all, delete-orphan"
     )
+    source_refs: Mapped[list[TradeSourceRef]] = relationship(
+        "TradeSourceRef", back_populates="trade", cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     __table_args__ = (
         Index("ix_trades_status", "status"),
         Index("ix_trades_etp_inn", "etp_inn"),
         Index("ix_trades_applications_to", "applications_to"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TradeSourceRef — provenance of an external trade record
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TradeSourceRef(Base):
+    """Provenance of a trade in an external catalogue.
+
+    ``efrsb_url`` remains on :class:`Trade` as a compatibility field for old
+    clients, while new source integrations write here and can coexist without
+    pretending every URL belongs to EFRSB.
+    """
+
+    __tablename__ = "trade_source_refs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_id: Mapped[int] = mapped_column(
+        ForeignKey("trades.id", ondelete="CASCADE"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(50))
+    source_url: Mapped[str] = mapped_column(String(1000))
+    external_trade_id: Mapped[str | None] = mapped_column(String(200))
+    external_lot_id: Mapped[str | None] = mapped_column(String(200))
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+
+    trade: Mapped[Trade] = relationship("Trade", back_populates="source_refs")
+
+    __table_args__ = (
+        UniqueConstraint("source", "source_url", name="uq_trade_source_ref_url"),
+        Index("ix_trade_source_refs_external", "source", "external_trade_id"),
     )
 
 
@@ -173,6 +211,8 @@ class Lot(Base):
     current_interval_to: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+
     cutoff_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     price_schedule_status: Mapped[str] = mapped_column(
         enum_string(PriceScheduleStatus, 20), default=PriceScheduleStatus.UNKNOWN.value
@@ -309,16 +349,20 @@ class Party(Base):
     headcount: Mapped[int | None] = mapped_column(Integer)
 
     kad_as_defendant_count: Mapped[int | None] = mapped_column(Integer)
-    kad_bankruptcy_open: Mapped[bool] = mapped_column(Boolean, default=False)
+    kad_bankruptcy_open: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     fssp_sum: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
-    fssp_uncollectible: Mapped[bool] = mapped_column(Boolean, default=False)
+    fssp_uncollectible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     source_as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enrich_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enrich_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enrich_failures: Mapped[int] = mapped_column(Integer, default=0)
     enrich_last_error: Mapped[str | None] = mapped_column(String(500))
+    source_checks: Mapped[list[PartySourceCheck]] = relationship(
+        "PartySourceCheck", back_populates="party", cascade="all, delete-orphan",
+        lazy="selectin",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -382,9 +426,9 @@ class Claim(Base):
     il_issue_date: Mapped[_date | None] = mapped_column(Date)
     il_present_deadline: Mapped[_date | None] = mapped_column(Date)
     court_case_no: Mapped[str | None] = mapped_column(String(50))
-    has_judgment: Mapped[bool] = mapped_column(Boolean, default=False)
-    has_writ: Mapped[bool] = mapped_column(Boolean, default=False)
-    enforcement_alive: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_judgment: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    has_writ: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    enforcement_alive: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     secured: Mapped[bool] = mapped_column(Boolean, default=False)
     assignment_forbidden: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -412,6 +456,32 @@ class Claim(Base):
     )
 
     __table_args__ = (Index("ix_claims_lot_id", "lot_id"),)
+
+
+class PartySourceCheck(Base):
+    """Result of checking one party against one external registry."""
+
+    __tablename__ = "party_source_checks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    party_id: Mapped[int] = mapped_column(
+        ForeignKey("parties.id", ondelete="CASCADE"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    source_url: Mapped[str | None] = mapped_column(String(1000))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    evidence: Mapped[dict | None] = mapped_column(JSONB)
+
+    party: Mapped[Party] = relationship("Party", back_populates="source_checks")
+
+    __table_args__ = (
+        UniqueConstraint("party_id", "source", name="uq_party_source_check"),
+        Index("ix_party_source_checks_status", "source", "status", "checked_at"),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

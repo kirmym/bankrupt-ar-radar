@@ -299,7 +299,11 @@ async def get_lot(
         .where(Lot.id == lot_id)
         .options(
             selectinload(Lot.trade).selectinload(Trade.bankrupt_party),
+            selectinload(Lot.trade).selectinload(Trade.source_refs),
             selectinload(Lot.claims).selectinload(Claim.debtor_party),
+            selectinload(Lot.claims)
+            .selectinload(Claim.debtor_party)
+            .selectinload(Party.source_checks),
             selectinload(Lot.claims).selectinload(Claim.guarantor_party),
             selectinload(Lot.price_intervals),
             selectinload(Lot.documents),
@@ -381,7 +385,11 @@ async def assign_debtor(
             .where(Lot.id == lot_id)
             .options(
                 selectinload(Lot.trade).selectinload(Trade.bankrupt_party),
+                selectinload(Lot.trade).selectinload(Trade.source_refs),
                 selectinload(Lot.claims).selectinload(Claim.debtor_party),
+                selectinload(Lot.claims)
+                .selectinload(Claim.debtor_party)
+                .selectinload(Party.source_checks),
                 selectinload(Lot.claims).selectinload(Claim.guarantor_party),
                 selectinload(Lot.price_intervals),
                 selectinload(Lot.documents),

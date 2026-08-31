@@ -100,8 +100,11 @@ class Gap(StrEnum):
     BO_MISSING = "bo_missing"
     KAD_MISSING = "kad_missing"
     FSSP_MISSING = "fssp_missing"
+    KAD_UNVERIFIED = "kad_unverified"
+    FSSP_UNVERIFIED = "fssp_unverified"
     KAD_BANKRUPTCY_OPEN = "kad_bankruptcy_open"
     FSSP_UNCOLLECTIBLE = "fssp_uncollectible"
+    CLAIM_EVIDENCE_UNVERIFIED = "claim_evidence_unverified"
     SCHEDULE_UNPARSED = "schedule_unparsed"
     NOMINAL_ESTIMATED = "nominal_estimated"  # Номинал взят из start_price
     NOMINAL_MISSING = "nominal_missing"

@@ -154,7 +154,7 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 |---|---|---|
 | `/health` | GET | Проверка |
 | `/api/v1/lots` | GET | Лента лотов с фильтрами (в production с `X-API-Key`) |
-| `/api/v1/lots/{id}` | GET | Карточка лота (в production с `X-API-Key`) |
+| `/api/v1/lots/{id}` | GET | Карточка лота с `source_refs`, source checks и tri-state фактами (в production с `X-API-Key`) |
 | `/api/v1/lots/{id}/debtor` | PUT | Ручная привязка ИНН дебитора (с `X-API-Key`) |
 | `/api/v1/documents/{id}/proposal/apply` | POST | Применить подтвержденное предложение фактов (с `X-API-Key`) |
 | `/api/v1/stats` | GET | Дашборд-агрегаты (в production с `X-API-Key`) |
@@ -186,6 +186,11 @@ Unregister-ScheduledTask -TaskName BankruptAR-CloakBrowser -Confirm:$false
 ## Источники данных
 
 Подробная политика транспорта, результаты живой проверки и варианты размещения collector: [docs/source-access-strategy.md](docs/source-access-strategy.md).
+
+В карточке лота каждый внешний URL находится в `trade.source_refs`, а проверки
+ЕГРЮЛ/ФССП/КАД — в `debtor_party.source_checks`. Юридические признаки имеют
+значения `true`, `false` или `null` (`null` отображается как «не проверено» и
+попадает в typed gap скоринга).
 
 | Источник | Что | Статус |
 |---|---|---|

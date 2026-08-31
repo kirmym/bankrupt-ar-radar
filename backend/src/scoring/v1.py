@@ -242,10 +242,14 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
             # economics while exposing the missing status as a visible gap.
             gaps.append(Gap.DEBTOR_STATUS_MISSING)
 
-        if debtor.fssp_uncollectible:
+        if debtor.fssp_uncollectible is None:
+            gaps.append(Gap.FSSP_UNVERIFIED)
+        elif debtor.fssp_uncollectible:
             gaps.append(Gap.FSSP_UNCOLLECTIBLE)
 
-        if debtor.kad_bankruptcy_open:
+        if debtor.kad_bankruptcy_open is None:
+            gaps.append(Gap.KAD_UNVERIFIED)
+        elif debtor.kad_bankruptcy_open:
             gaps.append(Gap.KAD_BANKRUPTCY_OPEN)
 
     # ── 3. Требования ────────────────────────────────────────────────────────
@@ -268,6 +272,12 @@ def compute_ev_and_class(inp: ScoreInput) -> ScoreResult:
 
     best_claim = max(inp.claims, key=_claim_rank, default=None)
     if best_claim is not None:
+        if (
+            best_claim.has_judgment is None
+            or best_claim.has_writ is None
+            or best_claim.enforcement_alive is None
+        ):
+            gaps.append(Gap.CLAIM_EVIDENCE_UNVERIFIED)
         best_claim_has_judgment = bool(best_claim.has_judgment)
         best_claim_has_writ = bool(best_claim.has_writ)
         best_enforcement_alive = bool(best_claim.enforcement_alive)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from src.models.entities import (
     PriceInterval,
     RawSnapshot,
     Trade,
+    TradeSourceRef,
 )
 from src.models.enums import (
     DZ_CLASSIFIER_CODES,
@@ -207,26 +209,48 @@ def _mark_ingest_changed(lot: Lot, changed: bool) -> None:
 
 async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     """Создаёт или обновляет торги + лот в БД."""
-    if not card.get("efrsb_url"):
+    source_url = card.get("source_url") or card.get("efrsb_url")
+    if not source_url:
         return None
 
+    source_name = str(card.get("source_name") or "efrsb_public")[:50]
+
     # Проверяем, не существует ли уже торг
-    stmt = select(Trade).where(Trade.efrsb_url == card["efrsb_url"])
-    result = await db.execute(stmt)
-    trade = result.scalar_one_or_none()
+    trade = None
+    # AsyncSession exposes ``scalar``; the small fake DB used by unit tests
+    # intentionally does not, so it keeps exercising the legacy lookup path.
+    if hasattr(db, "scalar"):
+        source_ref = await db.scalar(
+            select(TradeSourceRef).where(
+                TradeSourceRef.source == source_name,
+                TradeSourceRef.source_url == source_url,
+            )
+        )
+        if source_ref is not None:
+            trade = await db.get(Trade, source_ref.trade_id)
+    if trade is None:
+        stmt = select(Trade).where(Trade.efrsb_url == source_url)
+        result = await db.execute(stmt)
+        trade = result.scalar_one_or_none()
 
     if not trade:
         trade_kind = card.get("trade_kind")
         if trade_kind not in {item.value for item in TradeKind}:
             trade_kind = TradeKind.PUBLIC_OFFER.value
         trade = Trade(
-            efrsb_url=card["efrsb_url"],
+            # Keep the old column populated only for the EFRSB compatibility
+            # path. CDT and future connectors use TradeSourceRef instead.
+            efrsb_url=source_url if source_name == "efrsb_public" else None,
             trade_kind=trade_kind,
             trade_form=TradeForm.OPEN.value,
             status=TradeStatus.IN_PROGRESS.value,
         )
         db.add(trade)
         await db.flush()
+    elif source_name != "efrsb_public" and trade.efrsb_url == source_url:
+        # Migrate legacy CDT rows lazily as they are observed again; the
+        # canonical URL now lives only in TradeSourceRef.
+        trade.efrsb_url = None
 
     trade_status = card.get("trade_status")
     if trade_status in {item.value for item in TradeStatus}:
@@ -250,7 +274,39 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         if value is not None:
             setattr(trade, field, value)
 
-    source_name = str(card.get("source_name") or "efrsb_public")[:50]
+    if hasattr(db, "scalar"):
+        source_ref = await db.scalar(
+            select(TradeSourceRef).where(
+                TradeSourceRef.source == source_name,
+                TradeSourceRef.source_url == source_url,
+            )
+        )
+        if source_ref is None:
+            source_ref = TradeSourceRef(
+                trade_id=trade.id,
+                source=source_name,
+                source_url=source_url,
+                external_trade_id=(
+                    str(card.get("efrsb_trade_guid") or card.get("trade_id_on_etp"))
+                    if (card.get("efrsb_trade_guid") or card.get("trade_id_on_etp"))
+                    else None
+                ),
+                external_lot_id=(str(card["lot_no"]) if card.get("lot_no") is not None else None),
+            )
+            db.add(source_ref)
+        else:
+            source_ref.trade_id = trade.id
+            source_ref.captured_at = datetime.now(UTC)
+            if card.get("efrsb_trade_guid") or card.get("trade_id_on_etp"):
+                source_ref.external_trade_id = str(
+                    card.get("efrsb_trade_guid") or card.get("trade_id_on_etp")
+                )
+            if card.get("lot_no") is not None:
+                source_ref.external_lot_id = str(card["lot_no"])
+        if isinstance(card.get("raw_content"), str) and card["raw_content"]:
+            source_ref.content_hash = hashlib.sha256(
+                card["raw_content"].encode("utf-8", errors="ignore")
+            ).hexdigest()
     snapshot_content_type = str(card.get("snapshot_content_type") or "text/html")[:50]
     raw_content = card.get("raw_content")
     if isinstance(raw_content, str) and raw_content:
@@ -261,7 +317,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
             select(RawSnapshot)
             .where(
                 RawSnapshot.source == source_name,
-                RawSnapshot.source_url == card["efrsb_url"],
+                RawSnapshot.source_url == source_url,
                 RawSnapshot.raw_content == raw_content,
             )
             .order_by(RawSnapshot.captured_at.desc())
@@ -274,7 +330,7 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     if isinstance(raw_content, str) and raw_content:
         snapshot = RawSnapshot(
             source=source_name,
-            source_url=card["efrsb_url"],
+            source_url=source_url,
             content_type=snapshot_content_type,
             raw_content=raw_content[:1_000_000],
         )

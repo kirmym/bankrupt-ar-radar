@@ -32,6 +32,18 @@ class PriceIntervalSchema(BaseModel):
     is_current: bool = False
 
 
+class PartySourceCheckSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source: str
+    status: str
+    checked_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    failures: int = 0
+    source_url: str | None = None
+    last_error: str | None = None
+
+
 class DebtorPartySchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -51,6 +63,7 @@ class DebtorPartySchema(BaseModel):
     fssp_sum: Decimal | None = None
     fssp_uncollectible: bool | None = None
     source_as_of: datetime | None = None
+    source_checks: list[PartySourceCheckSchema] = Field(default_factory=list)
 
 
 class ClaimSchema(BaseModel):
@@ -68,9 +81,9 @@ class ClaimSchema(BaseModel):
     il_issue_date: date | None = None
     il_present_deadline: date | None = None
     court_case_no: str | None = None
-    has_judgment: bool = False
-    has_writ: bool = False
-    enforcement_alive: bool = False
+    has_judgment: bool | None = None
+    has_writ: bool | None = None
+    enforcement_alive: bool | None = None
     secured: bool = False
     assignment_forbidden: bool = False
     counterclaim_risk: bool = False
@@ -138,6 +151,16 @@ class LotListSchema(BaseModel):
 # ── Торги ─────────────────────────────────────────────────────────────────────
 
 
+class TradeSourceRefSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source: str
+    source_url: str
+    external_trade_id: str | None = None
+    external_lot_id: str | None = None
+    captured_at: datetime
+
+
 class TradeBriefSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -153,6 +176,7 @@ class TradeBriefSchema(BaseModel):
     am_name: str | None = None
     applications_from: datetime | None = None
     applications_to: datetime | None = None
+    source_refs: list[TradeSourceRefSchema] = Field(default_factory=list)
 
 
 class TradeSchema(TradeBriefSchema):

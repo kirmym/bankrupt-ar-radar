@@ -66,9 +66,21 @@ export interface DebtorParty {
   cash?: string;
   equity?: string;
   kad_as_defendant_count?: number;
-  kad_bankruptcy_open?: boolean;
+  kad_bankruptcy_open?: boolean | null;
   fssp_sum?: string;
-  fssp_uncollectible?: boolean;
+  fssp_uncollectible?: boolean | null;
+  source_as_of?: string;
+  source_checks?: PartySourceCheck[];
+}
+
+export interface PartySourceCheck {
+  source: string;
+  status: string;
+  checked_at?: string;
+  next_retry_at?: string;
+  failures: number;
+  source_url?: string;
+  last_error?: string;
 }
 
 export interface Claim {
@@ -84,9 +96,9 @@ export interface Claim {
   il_issue_date?: string;
   il_present_deadline?: string;
   court_case_no?: string;
-  has_judgment: boolean;
-  has_writ: boolean;
-  enforcement_alive: boolean;
+  has_judgment: boolean | null;
+  has_writ: boolean | null;
+  enforcement_alive: boolean | null;
   secured: boolean;
   assignment_forbidden: boolean;
   debtor_party?: DebtorParty;
@@ -123,6 +135,26 @@ export interface Lot {
   claims: Claim[];
   created_at: string;
   updated_at: string;
+  trade?: TradeBrief;
+}
+
+export interface TradeSourceRef {
+  source: string;
+  source_url: string;
+  external_trade_id?: string;
+  external_lot_id?: string;
+  captured_at: string;
+}
+
+export interface TradeBrief {
+  id: number;
+  guid: string;
+  efrsb_url?: string;
+  etp_name?: string;
+  etp_url?: string;
+  trade_kind: string;
+  status: string;
+  source_refs: TradeSourceRef[];
 }
 
 export interface LotList {

@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
 from src.database import async_session_factory
-from src.models.entities import Claim, Lot, ScoreSnapshot
+from src.models.entities import Claim, Lot, Party, ScoreSnapshot
 from src.models.enums import Gap, PriceScheduleStatus
 from src.schemas.lot import ClaimSchema, DebtorPartySchema
 from src.scoring.v1 import ScoreInput, _claim_rank, compute_ev_and_class
@@ -27,6 +27,9 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
         .options(
             selectinload(Lot.claims).selectinload(Claim.debtor_party),
             selectinload(Lot.claims).selectinload(Claim.guarantor_party),
+            selectinload(Lot.claims)
+            .selectinload(Claim.debtor_party)
+            .selectinload(Party.source_checks),
         )
     )
     result = await session.execute(stmt)

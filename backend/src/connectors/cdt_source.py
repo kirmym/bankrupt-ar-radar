@@ -189,8 +189,8 @@ def parse_cdt_detail(payload: dict[str, Any], *, now: datetime | None = None) ->
     return {
         "source_name": "cdt_public",
         "snapshot_content_type": "application/json",
-        # The current schema uses efrsb_url as the canonical public source URL.
-        # Keeping the actual CDT URL here preserves idempotency without a DB migration.
+        "source_url": source_url,
+        # Legacy parser consumers still read this alias; persistence uses source_url.
         "efrsb_url": source_url,
         "etp_url": source_url,
         "etp_name": "cdt",
