@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
+from src.analytics.calibration import build_calibration_report
 from src.api.diagnostics import router as diagnostics_router
 from src.api.security import require_api_access
 from src.config import get_settings
@@ -46,6 +47,7 @@ from src.models.enums import (
 )
 from src.runtime import start_background_tasks, stop_background_tasks, worker_status_snapshot
 from src.schemas.lot import (
+    CalibrationReportSchema,
     DashboardStats,
     DebtorAssignCreate,
     DocumentProposalUpdates,
@@ -576,16 +578,75 @@ async def create_feedback(
 ) -> FeedbackSchema:
     if await db.get(Lot, payload.lot_id) is None:
         raise HTTPException(status_code=404, detail="Lot not found")
+    if payload.action != "bought" and (
+        payload.outcome is not None
+        or payload.recovered_amount is not None
+        or payload.expense_amount is not None
+        or payload.outcome_at is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="recovery outcome fields are valid only for bought lots",
+        )
+    if payload.outcome == "recovered" and (
+        payload.recovered_amount is None or payload.recovered_amount <= 0
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="recovered outcome requires a positive recovered_amount",
+        )
+    if payload.outcome == "not_recovered" and payload.recovered_amount not in (None, Decimal(0)):
+        raise HTTPException(
+            status_code=422,
+            detail="not_recovered outcome cannot contain a positive recovered_amount",
+        )
+    lot = await db.get(Lot, payload.lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404, detail="Lot not found")
     fb = UserFeedback(
         lot_id=payload.lot_id,
         action=payload.action,
         recovered_amount=payload.recovered_amount,
+        expense_amount=payload.expense_amount,
+        outcome=payload.outcome,
+        outcome_at=payload.outcome_at,
         note=payload.note,
+        decision_score_class=lot.score_class,
+        decision_score_ev=lot.score_ev,
+        decision_max_bid=lot.score_max_bid,
+        decision_price=lot.current_price,
+        decision_nominal=lot.nominal_claimed,
+        decision_score_version=lot.score_version,
     )
     db.add(fb)
     await db.commit()
     await db.refresh(fb)
     return FeedbackSchema.model_validate(fb, from_attributes=True)
+
+
+@app.get(
+    "/api/v1/feedback/calibration",
+    response_model=CalibrationReportSchema,
+    tags=["feedback"],
+    dependencies=[Depends(require_api_access)],
+)
+async def feedback_calibration(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+) -> CalibrationReportSchema:
+    """Return outcome metrics without presenting them as calibrated odds."""
+    stmt = select(UserFeedback).order_by(UserFeedback.created_at.asc(), UserFeedback.id.asc())
+    if created_from is not None:
+        stmt = stmt.where(UserFeedback.created_at >= created_from)
+    if created_to is not None:
+        stmt = stmt.where(UserFeedback.created_at <= created_to)
+    rows = (await db.execute(stmt)).scalars().all()
+    report = build_calibration_report(
+        list(rows),
+        min_resolved=max(1, int(getattr(settings, "calibration_min_resolved", 10))),
+    )
+    return CalibrationReportSchema.model_validate(report)
 
 
 # ── SPA-статика (собранный фронтенд) ────────────────────────────────────────

@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -17,8 +20,11 @@ from selectolax.parser import HTMLParser
 from src.config import get_settings
 from src.connectors.cloakbrowser import (
     CHALLENGE_MARKERS,
-    CloakBrowserError,
+    BrowserState,
+    fetch_fssp_via_cloakbrowser,
     fetch_html_via_cloakbrowser,
+    fetch_json_via_cloakbrowser,
+    get_browser_session_broker,
 )
 from src.connectors.providers import provider_api_enabled
 
@@ -30,6 +36,52 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 EGRUL_PUBLIC_SEARCH_URL = "https://egrul.nalog.ru/"
+
+
+@dataclass(frozen=True)
+class SourceOutcome:
+    """Typed outcome retained alongside the legacy boolean connector API."""
+
+    ok: bool
+    state: str
+    error: str | None = None
+    evidence: dict[str, object] | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+_SOURCE_OUTCOMES: ContextVar[dict[str, SourceOutcome] | None] = ContextVar(
+    "source_outcomes", default=None
+)
+
+
+def _set_source_outcome(
+    source: str,
+    *,
+    ok: bool,
+    state: str | None = None,
+    error: str | None = None,
+    evidence: dict[str, object] | None = None,
+) -> None:
+    outcomes = dict(_SOURCE_OUTCOMES.get() or {})
+    outcomes[source] = SourceOutcome(
+        ok=ok,
+        state=state or (BrowserState.READY.value if ok else BrowserState.UNAVAILABLE.value),
+        error=error,
+        evidence=evidence,
+    )
+    _SOURCE_OUTCOMES.set(outcomes)
+
+
+def _source_outcome(source: str, ok: bool) -> SourceOutcome:
+    return (_SOURCE_OUTCOMES.get() or {}).get(
+        source,
+        SourceOutcome(
+            ok=ok,
+            state=BrowserState.READY.value if ok else BrowserState.UNAVAILABLE.value,
+        ),
+    )
 
 
 async def _fetch_egrul_rows(inn: str) -> list[dict[str, object]] | None:
@@ -251,9 +303,12 @@ async def _fetch_html(
     *,
     method: str = "GET",
     json_payload: dict | None = None,
+    source_name: str | None = None,
+    manual_challenge_wait_seconds: int = 0,
 ) -> str | None:
     """Fetch a parser page and retry a challenge through CloakBrowser."""
     settings = get_settings()
+    source = source_name or (urlparse(url).hostname or "source")
     try:
         async with httpx.AsyncClient(
             timeout=15.0,
@@ -281,19 +336,33 @@ async def _fetch_html(
 
     cdp_url = getattr(settings, "cloakbrowser_cdp_url", "")
     if not cdp_url:
+        _set_source_outcome(source, ok=False, state=BrowserState.UNAVAILABLE.value)
         return None
     host = urlparse(url).hostname or ""
-    try:
-        return await fetch_html_via_cloakbrowser(
+    result = await get_browser_session_broker().execute(
+        source,
+        lambda: fetch_html_via_cloakbrowser(
             url,
             cdp_url=cdp_url,
             timeout_seconds=int(getattr(settings, "cloakbrowser_timeout_seconds", 90)),
             wait_seconds=int(getattr(settings, "cloakbrowser_wait_seconds", 8)),
+            manual_challenge_wait_seconds=manual_challenge_wait_seconds,
             allowed_hosts={host},
-        )
-    except CloakBrowserError:
-        logger.exception("source parser browser fallback failed: %s", url)
-        return None
+        ),
+        min_interval_seconds=float(
+            getattr(settings, "cloakbrowser_min_interval_seconds", 0.0)
+        ),
+    )
+    _set_source_outcome(
+        source,
+        ok=result.ok,
+        state=result.state.value,
+        error=result.error,
+    )
+    if result.ok:
+        return result.body
+    logger.warning("source parser browser fallback unavailable (%s): %s", source, result.error)
+    return None
 
 
 def _d(value: str | None, default: Decimal = Decimal(0)) -> Decimal:
@@ -388,6 +457,7 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
     """Запрашивает ФССП исполнительные производства по ИНН."""
     if not party.inn:
         return False
+    inn = party.inn
 
     try:
         source_settings = get_settings()
@@ -416,9 +486,41 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
             party.fssp_uncollectible = any(
                 item.get("status") == "uncollectible" for item in results
             )
+            _set_source_outcome(
+                "fssp",
+                ok=True,
+                state=BrowserState.READY.value,
+                evidence={"records": len(results), "transport": "free_api"},
+            )
             return True
 
-        html = await _fetch_html(f"https://fssp.gov.ru/iss/ip?query={quote_plus(party.inn)}")
+        cdp_url = getattr(source_settings, "cloakbrowser_cdp_url", "")
+        if cdp_url:
+            browser_result = await get_browser_session_broker().execute(
+                "fssp",
+                lambda: fetch_fssp_via_cloakbrowser(
+                    inn,
+                    cdp_url=cdp_url,
+                    timeout_seconds=int(
+                        getattr(source_settings, "cloakbrowser_timeout_seconds", 90)
+                    ),
+                    manual_challenge_wait_seconds=int(
+                        getattr(source_settings, "fssp_manual_challenge_wait_seconds", 300)
+                    ),
+                ),
+                min_interval_seconds=float(
+                    getattr(source_settings, "cloakbrowser_min_interval_seconds", 0.0)
+                ),
+            )
+            _set_source_outcome(
+                "fssp",
+                ok=browser_result.ok,
+                state=browser_result.state.value,
+                error=browser_result.error,
+            )
+            html = browser_result.body if browser_result.ok else None
+        else:
+            html = await _fetch_html(f"https://fssp.gov.ru/iss/ip?query={quote_plus(party.inn)}")
         if not html:
             return False
         lowered = html.lower()
@@ -432,10 +534,76 @@ async def enrich_from_fssp(party: Party, session: AsyncSession) -> bool:
         party.fssp_uncollectible = any(
             marker in lowered for marker in ("п. 4 ч. 1 ст. 46", "невозможностью взыскания")
         )
+        _set_source_outcome(
+            "fssp",
+            ok=True,
+            state=BrowserState.READY.value,
+            evidence={"records": len(sums), "transport": "browser_or_html"},
+        )
         return True
     except Exception:
         logger.exception("fssp enrichment failed for %s", party.inn)
         return False
+
+
+def _parse_kad_json(text: str) -> tuple[int, bool, dict[str, object]] | None:
+    """Parse the frontend response variants used by KAD over time."""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    root = payload.get("Result") or payload.get("result") or payload
+    if not isinstance(root, dict):
+        return None
+    items = root.get("Items") or root.get("items") or root.get("results")
+    if not isinstance(items, list):
+        return None
+    total = (
+        root.get("TotalCount")
+        or root.get("totalCount")
+        or root.get("Total")
+        or root.get("total")
+        or payload.get("total")
+    )
+    if not isinstance(total, int) or total < 0:
+        total = len(items)
+    bankruptcy = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        case_type = str(item.get("CaseType") or item.get("caseType") or "").lower()
+        item_text = json.dumps(item, ensure_ascii=False).lower()
+        if case_type in {"б", "b", "bankruptcy"} or "банкрот" in item_text:
+            bankruptcy = True
+            break
+    return total, bankruptcy, {"records": len(items), "transport": "browser_json"}
+
+
+def _parse_kad_html(html: str) -> tuple[int, bool, dict[str, object]] | None:
+    lowered = html.lower()
+    tree = HTMLParser(html)
+    case_texts: list[str] = []
+    for node in tree.css("tr, .b-case, .case-item, [data-case-number], .num_case"):
+        node_text = node.text().strip().lower()
+        if re.search(r"[а-яa-z]\d{1,3}-\d+/\d{4}", node_text):
+            case_texts.append(node_text)
+    count_match = re.search(
+        r"(?:найдено|всего|дел[ао]|total(?:count)?)\D{0,30}(\d+)", lowered
+    )
+    if count_match:
+        total = int(count_match.group(1))
+    elif "дел не найдено" in lowered or "ничего не найдено" in lowered:
+        total = 0
+    elif case_texts:
+        total = len(case_texts)
+    else:
+        return None
+    return total, any("банкрот" in text for text in case_texts), {
+        "records": len(case_texts),
+        "transport": "browser_html",
+    }
 
 
 async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
@@ -463,55 +631,150 @@ async def enrich_from_kad(party: Party, session: AsyncSession) -> bool:
             ) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code != 200:
+                    state = (
+                        BrowserState.ROUTE_BLOCKED.value
+                        if resp.status_code == 451
+                        else BrowserState.CHALLENGE.value
+                        if resp.status_code in (401, 403, 429)
+                        else BrowserState.HTTP_ERROR.value
+                    )
+                    _set_source_outcome(
+                        "kad",
+                        ok=False,
+                        state=state,
+                        error=f"KAD API status={resp.status_code}",
+                    )
                     return False
                 data = resp.json()
-            if (
-                not isinstance(data, dict)
-                or not isinstance(data.get("total"), int)
-                or not isinstance(data.get("results"), list)
-            ):
+            api_parsed = _parse_kad_json(json.dumps(data, ensure_ascii=False))
+            if api_parsed is None:
+                _set_source_outcome(
+                    "kad",
+                    ok=False,
+                    state=BrowserState.HTTP_ERROR.value,
+                    error="KAD API response schema was not recognized",
+                )
                 return False
-            party.kad_as_defendant_count = data["total"]
-            party.kad_bankruptcy_open = any(
-                "банкротств" in str(d).lower() for d in data.get("results", [])
+            party.kad_as_defendant_count, party.kad_bankruptcy_open, evidence = api_parsed
+            _set_source_outcome(
+                "kad",
+                ok=True,
+                state=BrowserState.READY.value,
+                evidence={**evidence, "transport": "free_api"},
             )
             return True
 
-        html = await _fetch_html(f"https://kad.arbitr.ru/Kad/SearchInstances?Sides={quote_plus(party.inn)}")
-        if not html:
-            return False
-        lowered = html.lower()
-        tree = HTMLParser(html)
-        count_match = re.search(r"(?:найдено|всего|дел[ао])\D{0,30}(\d+)", lowered)
-        if count_match:
-            party.kad_as_defendant_count = int(count_match.group(1))
-        elif "дел не найдено" in lowered or "ничего не найдено" in lowered:
-            party.kad_as_defendant_count = 0
+        settings = get_settings()
+        cdp_url = getattr(settings, "cloakbrowser_cdp_url", "")
+        kad_parsed: tuple[int, bool, dict[str, object]] | None = None
+        if cdp_url:
+            browser_result = await get_browser_session_broker().execute(
+                "kad",
+                lambda: fetch_json_via_cloakbrowser(
+                    "https://kad.arbitr.ru/",
+                    path="/Kad/SearchInstances",
+                    payload=payload,
+                    cdp_url=cdp_url,
+                    timeout_seconds=int(getattr(settings, "cloakbrowser_timeout_seconds", 90)),
+                    manual_challenge_wait_seconds=int(
+                        getattr(settings, "kad_manual_challenge_wait_seconds", 0)
+                    ),
+                    allowed_hosts={"kad.arbitr.ru"},
+                ),
+                min_interval_seconds=float(
+                    getattr(settings, "cloakbrowser_min_interval_seconds", 0.0)
+                ),
+            )
+            _set_source_outcome(
+                "kad",
+                ok=browser_result.ok,
+                state=browser_result.state.value,
+                error=browser_result.error,
+            )
+            if browser_result.ok:
+                kad_parsed = _parse_kad_json(browser_result.body) or _parse_kad_html(browser_result.body)
+            if kad_parsed is None:
+                if browser_result.ok:
+                    _set_source_outcome(
+                        "kad",
+                        ok=False,
+                        state=BrowserState.HTTP_ERROR.value,
+                        error="KAD response schema was not recognized",
+                    )
+                return False
         else:
-            return False
-        # Only inspect actual case rows.  Searching the whole page turns a
-        # navigation label such as "банкротство" into a false positive.
-        case_texts = []
-        for node in tree.css("tr, .b-case, .case-item, [data-case-number]"):
-            node_text = node.text().strip().lower()
-            if re.search(r"[а-яa-z]\d{1,3}-\d+/\d{4}", node_text):
-                case_texts.append(node_text)
-        party.kad_bankruptcy_open = any("банкрот" in text for text in case_texts)
+            html = await _fetch_html(
+                f"https://kad.arbitr.ru/Kad/SearchInstances?Sides={quote_plus(party.inn)}"
+            )
+            if not html:
+                return False
+            kad_parsed = _parse_kad_html(html)
+            if kad_parsed is None:
+                _set_source_outcome(
+                    "kad",
+                    ok=False,
+                    state=BrowserState.HTTP_ERROR.value,
+                    error="KAD HTML response schema was not recognized",
+                )
+                return False
+        count, bankruptcy_open, evidence = kad_parsed
+        party.kad_as_defendant_count = count
+        party.kad_bankruptcy_open = bankruptcy_open
+        _set_source_outcome(
+            "kad",
+            ok=True,
+            state=BrowserState.READY.value,
+            evidence=evidence,
+        )
         return True
     except Exception:
         logger.exception("kad enrichment failed for %s", party.inn)
         return False
 
 
-async def enrich_party(party: Party, session: AsyncSession) -> dict[str, bool]:
+async def _run_source(
+    source: str,
+    operation,
+    party: Party,
+    session: AsyncSession,
+) -> SourceOutcome:
+    """Run one legacy boolean connector while preserving typed metadata."""
+    _set_source_outcome(source, ok=False, state=BrowserState.UNAVAILABLE.value)
+    ok = await operation(party, session)
+    outcome = _source_outcome(source, bool(ok))
+    if ok:
+        # Some legacy connectors return a verified boolean without explicitly
+        # publishing a SourceOutcome. Do not let the wrapper's initial
+        # ``unavailable`` sentinel hide that successful result.
+        if outcome.ok:
+            return outcome
+        return SourceOutcome(
+            ok=True,
+            state=BrowserState.READY.value,
+            evidence=outcome.evidence,
+        )
+    if not outcome.ok:
+        return outcome
+    # A connector may have fetched a page successfully but failed to verify
+    # its schema. The boolean result is authoritative for the worker, while
+    # retaining any evidence collected before verification failed.
+    return SourceOutcome(
+        ok=False,
+        state=BrowserState.HTTP_ERROR.value,
+        error=outcome.error or "source returned no verified result",
+        evidence=outcome.evidence,
+    )
+
+
+async def enrich_party(party: Party, session: AsyncSession) -> dict[str, SourceOutcome]:
     """Обогащает лицо без конкурентных commit одной SQLAlchemy-сессии."""
     # The connectors only mutate disjoint fields on the same in-memory party;
     # database writes remain serialized by the worker after all requests finish.
     # Running the independent public-source requests together prevents a slow
     # or blocked KAD/FSSP endpoint from delaying the EGRUL identity result.
     egrul, fssp, kad = await asyncio.gather(
-        enrich_from_egrul(party, session),
-        enrich_from_fssp(party, session),
-        enrich_from_kad(party, session),
+        _run_source("egrul", enrich_from_egrul, party, session),
+        _run_source("fssp", enrich_from_fssp, party, session),
+        _run_source("kad", enrich_from_kad, party, session),
     )
     return {"egrul": egrul, "fssp": fssp, "kad": kad}

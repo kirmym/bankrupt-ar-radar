@@ -201,6 +201,40 @@ def test_egrul_extract_parser_does_not_mark_negative_liquidation_phrase() -> Non
     assert parsed["status"] is None
 
 
+def test_kad_json_parser_accepts_frontend_result_shape() -> None:
+    from src.connectors.enrich import _parse_kad_json
+
+    parsed = _parse_kad_json(
+        '{"Result":{"TotalCount":2,"Items":['
+        '{"CaseType":"Б","Number":"А40-1/2024"},'
+        '{"CaseType":"И","Number":"А40-2/2024"}]}}'
+    )
+
+    assert parsed is not None
+    assert parsed[0] == 2
+    assert parsed[1] is True
+    assert parsed[2]["transport"] == "browser_json"
+
+
+def test_kad_json_parser_rejects_unknown_schema() -> None:
+    from src.connectors.enrich import _parse_kad_json
+
+    assert _parse_kad_json('{"message":"captcha"}') is None
+
+
+@pytest.mark.asyncio
+async def test_run_source_promotes_legacy_success_to_typed_outcome() -> None:
+    from src.connectors.enrich import _run_source
+
+    async def successful_connector(_party, _session) -> bool:
+        return True
+
+    outcome = await _run_source("egrul", successful_connector, None, None)
+
+    assert outcome.ok is True
+    assert outcome.state == "ready"
+
+
 @pytest.mark.asyncio
 async def test_fssp_no_results_are_not_marked_uncollectible(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.connectors import enrich

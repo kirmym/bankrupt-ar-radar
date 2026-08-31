@@ -34,8 +34,15 @@
    | `CLOAKBROWSER_CDP_URL` | CDP endpoint запущенного профиля CloakBrowser для challenge fallback |
    | `CLOAKBROWSER_PROXY_URL` | HTTP(S)/SOCKS proxy профиля CloakBrowser; задаётся до запуска профиля |
    | `CLOAKBROWSER_WAIT_SECONDS` | время ожидания ручного прохождения проверки |
+   | `CLOAKBROWSER_MIN_INTERVAL_SECONDS` | минимальный интервал между browser-запросами одного источника; по умолчанию `2` |
+   | `KAD_MANUAL_CHALLENGE_WAIT_SECONDS` | ожидание оператора для challenge КАД; `0` = не блокировать воркер |
+   | `FSSP_MANUAL_CHALLENGE_WAIT_SECONDS` | ожидание ручного ввода CAPTCHA ФССП; по умолчанию `300` |
+   | `ZERO_LOT_ALERT_HOURS` | окно контроля тишины основного источника; по умолчанию `6` |
+   | `CALIBRATION_MIN_RESOLVED` | минимум завершённых покупок для статуса calibration `ready`; по умолчанию `10` |
    | `SOURCE_PROXY_URL` | необязательный HTTP(S)-прокси только для публичных source-запросов; Telegram/OpenAI не проксируются |
    | `FREE_API_SOURCES` | только документально подтверждённые бесплатные production API; сейчас оставлять пустым |
+   | `EFRSB_REST_ENABLED` | договорной REST ЕФРСБ; по умолчанию выключен |
+   | `EFRSB_REST_CONTRACT_CONFIRMED` | обязательное явное подтверждение договора перед REST-вызовами |
    | `INGEST_SOURCES` | источники первичного импорта через запятую; по умолчанию `cdt`, опционально `cdt,efrsb` |
    | `CDT_INGEST_MAX_ITEMS` | лимит карточек ЦДТ за один запуск; по умолчанию `250` |
 
@@ -160,7 +167,8 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/api/v1/stats` | GET | Дашборд-агрегаты (в production с `X-API-Key`) |
 | `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
 | `/api/v1/workers/status` | GET | Состояние фоновых worker-циклов (с `X-API-Key`) |
-| `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought) |
+| `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought), для bought — outcome/recovered_amount/expense_amount |
+| `/api/v1/feedback/calibration` | GET | Отчёт по исходам взыскания и ошибке EV; до минимальной выборки статус `insufficient_data` |
 | `/docs` | GET | Swagger UI |
 
 Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`.
@@ -173,7 +181,7 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 
 ## CloakBrowser fallback
 
-Обычный HTTP-парсер используется первым. При `401`, `403`, `429`, сетевой ошибке или challenge ЕФРСБ и поддержанные ЭТП повторяются через уже запущенный профиль CloakBrowser по CDP. Профиль должен быть доступен воркеру и может потребовать ручного прохождения капчи. Проект не решает капчи автоматически и не подменяет домены или allowlist источников. HTTP-статусы 4xx/5xx и страницы `404` не маскируются под ошибку разметки. В Docker-образе клиент `playwright` устанавливается автоматически; при локальном запуске его нужно установить в окружение воркера отдельно.
+Обычный HTTP-парсер используется первым. При `401`, `403`, `429`, сетевой ошибке или challenge поддержанные источники повторяются через уже запущенный профиль CloakBrowser по CDP. Профиль должен быть доступен воркеру и может потребовать ручного прохождения капчи. Для КАД браузер выполняет same-origin `POST /Kad/SearchInstances`, который использует публичный frontend; GET-оболочка не считается результатом. Для ФССП headed-профиль заполняет форму и ждёт ручного ввода CAPTCHA. Проект не решает капчи автоматически и не подменяет домены или allowlist источников. HTTP-статусы 4xx/5xx и страницы `404` не маскируются под ошибку разметки; `451` записывается как `route_blocked`. В Docker-образе клиент `playwright` устанавливается автоматически; при локальном запуске его нужно установить в окружение воркера отдельно.
 
 Для локального автозапуска CloakBrowser (Windows Task Scheduler):
 
@@ -186,6 +194,22 @@ Unregister-ScheduledTask -TaskName BankruptAR-CloakBrowser -Confirm:$false
 ## Источники данных
 
 Подробная политика транспорта, результаты живой проверки и варианты размещения collector: [docs/source-access-strategy.md](docs/source-access-strategy.md).
+
+Для точечного поиска из Python доступен порт механизма `parsing_gov.py`:
+
+```python
+from src.connectors.government import GovernmentParser
+
+parser = GovernmentParser()
+fssp_rows = await parser.fssp.search_by_ip_number("123-456/2023/01")
+kad_rows = await parser.kad.search_cases("ООО Ромашка")
+await parser.close()
+```
+
+Клиент использует уже запущенный профиль по `CLOAKBROWSER_CDP_URL`, ограничивает
+параллельные запросы по домену и возвращает пустой список при typed-состоянии
+`challenge`/`route_blocked`; последнее состояние доступно в `parser.last_results`.
+CAPTCHA не решается внешним сервисом автоматически.
 
 В карточке лота каждый внешний URL находится в `trade.source_refs`, а проверки
 ЕГРЮЛ/ФССП/КАД — в `debtor_party.source_checks`. Юридические признаки имеют

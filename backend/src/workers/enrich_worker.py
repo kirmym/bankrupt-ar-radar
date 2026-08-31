@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, or_, select, update
 
 from src.config import get_settings
-from src.connectors.enrich import enrich_party
+from src.connectors.enrich import SourceOutcome, enrich_party
 from src.database import async_session_factory
 from src.models.entities import Claim, Lot, Party, PartySourceCheck
 from src.models.enums import PartyRole
@@ -24,10 +25,22 @@ SOURCE_URLS = {
 
 
 async def record_source_checks(
-    session, party: Party, statuses: dict[str, bool], checked_at: datetime
+    session,
+    party: Party,
+    statuses: Mapping[str, SourceOutcome | bool],
+    checked_at: datetime,
 ) -> None:
     """Persist one explicit result per registry instead of overloading a flag."""
-    for source, ok in statuses.items():
+    for source, raw_outcome in statuses.items():
+        outcome = (
+            raw_outcome
+            if isinstance(raw_outcome, SourceOutcome)
+            else SourceOutcome(
+                ok=bool(raw_outcome),
+                state="success" if raw_outcome else "unavailable",
+            )
+        )
+        ok = outcome.ok
         check = (
             await session.execute(
                 select(PartySourceCheck).where(
@@ -43,7 +56,7 @@ async def record_source_checks(
                 failures=0,
             )
             session.add(check)
-        check.status = "success" if ok else "unavailable"
+        check.status = "success" if ok else outcome.state
         check.checked_at = checked_at
         check.source_url = SOURCE_URLS.get(source)
         if ok:
@@ -55,7 +68,10 @@ async def record_source_checks(
             check.next_retry_at = enrich_retry_at(
                 checked_at, check.failures, settings.enrich_max_attempts
             )
-            check.last_error = "source returned no verified result"
+            check.last_error = (
+                outcome.error or "source returned no verified result"
+            )[:500]
+        check.evidence = outcome.evidence
 
 
 def enrich_retry_at(
@@ -129,8 +145,9 @@ async def run_enrich(batch_size: int = 50) -> int:
             debtor_id = debtor.id
             attempt_at = datetime.now(UTC)
             try:
-                statuses = await enrich_party(debtor, session)
-                await record_source_checks(session, debtor, statuses, attempt_at)
+                outcomes = await enrich_party(debtor, session)
+                statuses = {source: outcome.ok for source, outcome in outcomes.items()}
+                await record_source_checks(session, debtor, outcomes, attempt_at)
                 if any(statuses.values()):
                     # Network calls happen outside a row lock.  Once a source
                     # returns, invalidate linked scores even when EGRUL itself
@@ -167,7 +184,10 @@ async def run_enrich(batch_size: int = 50) -> int:
                     )
                     debtor.enrich_last_error = (
                         "EGRUL verification failed; "
-                        + ", ".join(f"{source}={ok}" for source, ok in statuses.items())
+                        + ", ".join(
+                            f"{source}={outcome.state}"
+                            for source, outcome in outcomes.items()
+                        )
                     )[:500]
                     logger.warning("enrich: %s deferred (%s)", debtor.inn, statuses)
                     failed += 1

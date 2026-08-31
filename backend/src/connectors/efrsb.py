@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta, timezone
@@ -629,13 +630,172 @@ def parse_legacy_public_offers(
     return items
 
 
+class EfrsbRestSource:
+    """Optional contract-bound REST transport for the Fedresurs register.
+
+    The public parser remains the default. This adapter is deliberately
+    disabled unless an operator has both an active contract and an explicit
+    ``EFRSB_REST_ENABLED=true`` setting. It never falls back to a paid endpoint
+    implicitly and accepts only the configured origin.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        trade_messages_path: str = "/v1/trade-messages",
+        timeout: float = 30.0,
+        proxy_url: str | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.token = token.strip()
+        self.trade_messages_path = trade_messages_path
+        self.timeout = timeout
+        self.proxy_url = proxy_url
+        self._client: httpx.AsyncClient | None = None
+        parsed = urlparse(self.base_url)
+        self._host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not self._host:
+            raise SourceAccessError("EFRSB REST base URL must be an absolute HTTP(S) URL")
+        if not self.trade_messages_path.startswith("/") or "//" in self.trade_messages_path:
+            raise SourceAccessError("EFRSB REST method path is invalid")
+
+    async def __aenter__(self) -> EfrsbRestSource:
+        self._client = httpx.AsyncClient(
+            timeout=self.timeout,
+            follow_redirects=False,
+            proxy=self.proxy_url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.token}",
+                "User-Agent": "AR-Radar/1.0 (contract REST source)",
+            },
+        )
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+
+    @staticmethod
+    def _extract_items(payload: object) -> list[dict[str, object]] | None:
+        if isinstance(payload, list):
+            candidate_items: object = payload
+        elif isinstance(payload, dict):
+            candidate_items = payload
+            for key in ("items", "Items", "results", "Results", "messages", "Messages", "data", "Data"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    candidate_items = value
+                    break
+                if isinstance(value, dict):
+                    nested = EfrsbRestSource._extract_items(value)
+                    if nested is not None:
+                        return nested
+            if candidate_items is payload:
+                return None
+        else:
+            return None
+        if not isinstance(candidate_items, list):
+            return None
+        return [item for item in candidate_items if isinstance(item, dict)]
+
+    def _normalize_item(self, item: dict[str, object], page: int) -> dict[str, object] | None:
+        def value(*keys: str) -> str:
+            for key in keys:
+                raw = item.get(key)
+                if raw is not None and str(raw).strip():
+                    return str(raw).strip()
+            return ""
+
+        href = value("url", "Url", "cardUrl", "CardUrl", "tradeUrl", "TradeUrl")
+        if not href:
+            return None
+        parsed = urlparse(href)
+        if not parsed.scheme:
+            href = urljoin(f"{self.base_url}/", href)
+            parsed = urlparse(href)
+        if (parsed.hostname or "").lower() != self._host:
+            raise SourceAccessError("EFRSB REST item URL leaves the configured origin")
+        trade_number = value("guid", "Guid", "tradeGuid", "TradeGuid", "id", "Id", "number", "Number")
+        title = value("title", "Title", "name", "Name", "subject", "Subject")
+        description = value("description", "Description", "text", "Text", "content", "Content")
+        return {
+            "source_name": "efrsb_rest",
+            "snapshot_content_type": "application/json",
+            "source_url": href,
+            "url": href,
+            "title": title or f"Торги {trade_number}".strip(),
+            "description_text": description,
+            "price_text": value("price", "Price", "startPrice", "StartPrice"),
+            "date_text": value("date", "Date", "publishedAt", "PublishedAt"),
+            "source_page": page,
+            "trade_number": trade_number,
+            "trade_id_on_etp": value("tradeId", "TradeId", "id", "Id") or None,
+            "efrsb_trade_guid": value("tradeGuid", "TradeGuid", "guid", "Guid") or None,
+            "raw_content": json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str),
+        }
+
+    async def search_public_offers(self, *, page: int, per_page: int) -> list[dict[str, object]]:
+        if not self.token:
+            raise SourceAccessError("EFRSB REST requires a contract token")
+        if self._client is None:
+            raise RuntimeError("EFRSB REST source is not initialized")
+        response = await self._client.get(
+            f"{self.base_url}{self.trade_messages_path}",
+            params={"page": max(1, page), "pageSize": max(1, min(per_page, 100)), "type": "public_offer"},
+        )
+        if response.status_code in {401, 403, 429} or response.status_code >= 500:
+            raise SourceAccessError(f"EFRSB REST source access status={response.status_code}")
+        if response.status_code == 404:
+            raise SourceAccessError("EFRSB REST method was not found")
+        if response.status_code >= 400:
+            raise SourceAccessError(f"EFRSB REST source status={response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SourceParseError("EFRSB REST response is not valid JSON") from exc
+        items = self._extract_items(payload)
+        if items is None:
+            raise SourceParseError("EFRSB REST response has no item list")
+        normalized = [self._normalize_item(item, page) for item in items]
+        return [item for item in normalized if item is not None]
+
+
+async def search_public_offers_rest(page: int = 1, per_page: int = 50) -> list[dict[str, object]]:
+    """Use REST only when an operator explicitly confirms the contract."""
+    settings = get_settings()
+    if not bool(getattr(settings, "efrsb_rest_enabled", False)):
+        raise SourceAccessError("EFRSB contract REST is disabled")
+    if not bool(getattr(settings, "efrsb_rest_contract_confirmed", False)):
+        raise SourceAccessError("EFRSB REST requires contract confirmation")
+    base_url = str(getattr(settings, "efrsb_rest_base_url", "")).strip()
+    token = str(getattr(settings, "efrsb_rest_token", "")).strip()
+    if not base_url or not token:
+        raise SourceAccessError("EFRSB REST requires base URL and token")
+    async with EfrsbRestSource(
+        base_url,
+        token,
+        trade_messages_path=str(
+            getattr(settings, "efrsb_rest_trade_messages_path", "/v1/trade-messages")
+        ),
+        timeout=float(getattr(settings, "efrsb_rest_timeout_seconds", 30)),
+        proxy_url=getattr(settings, "source_proxy", None),
+    ) as source:
+        return await source.search_public_offers(page=page, per_page=per_page)
+
+
 async def search_public_offers(
     page: int = 1,
     per_page: int = 50,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
     """Ищет лоты публичного предложения через HTML или CloakBrowser fallback."""
-    legacy_source = _is_legacy_efrsb_url(get_settings().efrsb_public_url)
+    settings = get_settings()
+    if bool(getattr(settings, "efrsb_rest_enabled", False)):
+        return await search_public_offers_rest(page=page, per_page=per_page)
+    legacy_source = _is_legacy_efrsb_url(settings.efrsb_public_url)
     params: dict[str, str | int] = (
         {
             "page": page,

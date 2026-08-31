@@ -42,6 +42,7 @@ class PartySourceCheckSchema(BaseModel):
     failures: int = 0
     source_url: str | None = None
     last_error: str | None = None
+    evidence: dict[str, object] | None = None
 
 
 class DebtorPartySchema(BaseModel):
@@ -288,6 +289,9 @@ class FeedbackCreate(BaseModel):
     lot_id: int = Field(gt=0)
     action: Annotated[str, Field(pattern="^(watch|reject|bought)$")]
     recovered_amount: Decimal | None = Field(default=None, ge=0)
+    expense_amount: Decimal | None = Field(default=None, ge=0)
+    outcome: Annotated[str | None, Field(pattern="^(in_progress|recovered|not_recovered)$")] = None
+    outcome_at: datetime | None = None
     note: str | None = Field(default=None, max_length=4000)
 
 
@@ -298,8 +302,43 @@ class FeedbackSchema(BaseModel):
     lot_id: int
     action: str
     recovered_amount: Decimal | None = None
+    expense_amount: Decimal | None = None
+    outcome: str | None = None
+    outcome_at: datetime | None = None
     note: str | None = None
     created_at: datetime
+
+
+class CalibrationBucketSchema(BaseModel):
+    score_class: str | None = None
+    bought: int = 0
+    resolved: int = 0
+    recovered: int = 0
+    unresolved: int = 0
+    recovery_rate: Decimal | None = None
+    recovered_amount: Decimal = Decimal(0)
+    expense_amount: Decimal = Decimal(0)
+    net_recovered_amount: Decimal = Decimal(0)
+    avg_predicted_ev: Decimal | None = None
+    mean_abs_recovered_vs_ev: Decimal | None = None
+
+
+class CalibrationReportSchema(BaseModel):
+    status: str
+    min_resolved: int
+    total_feedback: int
+    decision_counts: dict[str, int]
+    purchases: int
+    resolved_purchases: int
+    unresolved_purchases: int
+    recovered_purchases: int
+    recovery_rate: Decimal | None = None
+    recovered_amount: Decimal = Decimal(0)
+    expense_amount: Decimal = Decimal(0)
+    net_recovered_amount: Decimal = Decimal(0)
+    mean_abs_recovered_vs_ev: Decimal | None = None
+    model_versions: list[str] = Field(default_factory=list)
+    by_class: list[CalibrationBucketSchema] = Field(default_factory=list)
 
 
 class DebtorAssignCreate(BaseModel):

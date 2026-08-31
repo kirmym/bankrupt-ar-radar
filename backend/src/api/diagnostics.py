@@ -17,6 +17,7 @@ from src.config import Settings, get_settings
 from src.connectors.cloakbrowser import (
     CloakBrowserError,
     CloakBrowserHttpError,
+    browser_metrics_snapshot,
     fetch_html_via_cloakbrowser,
 )
 
@@ -70,6 +71,8 @@ async def _check(client: httpx.AsyncClient, name: str, url: str, critical: bool)
             "state": (
                 "ok"
                 if 200 <= resp.status_code < 300
+                else "route_blocked"
+                if resp.status_code == 451
                 else "challenge"
                 if resp.status_code in (401, 403, 429)
                 else "error"
@@ -157,7 +160,13 @@ async def _check_browser(name: str, url: str, critical: bool) -> dict:
             "ok": False,
             "status_code": exc.status_code,
             "latency_ms": int((time.monotonic() - started) * 1000),
-            "state": "http_error",
+            "state": (
+                "route_blocked"
+                if exc.status_code == 451
+                else "challenge"
+                if exc.status_code in (401, 403, 429)
+                else "http_error"
+            ),
             "error": type(exc).__name__,
             "critical": critical,
         }
@@ -219,4 +228,5 @@ async def check_sources() -> dict:
         "blocked_critical": blocked,
         "results": results,
         "browser_results": browser_results,
+        "browser_metrics": browser_metrics_snapshot(),
     }

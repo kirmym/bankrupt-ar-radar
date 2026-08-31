@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     telegram_chat_ids: str = ""
 
     efrsb_public_url: str = "https://old.bankrot.fedresurs.ru"
+    # Contract-bound REST is opt-in and disabled until the operator confirms
+    # the paid service terms for this deployment.
+    efrsb_rest_enabled: bool = False
+    efrsb_rest_contract_confirmed: bool = False
+    efrsb_rest_base_url: str = ""
+    efrsb_rest_token: str = ""
+    efrsb_rest_trade_messages_path: str = "/v1/trade-messages"
+    efrsb_rest_timeout_seconds: int = 30
     # Operational seed sources. CDT is enabled by default because its public
     # JSON endpoints are currently reachable without credentials. EFRSB can be
     # added back with INGEST_SOURCES=cdt,efrsb when its public route works.
@@ -60,6 +68,13 @@ class Settings(BaseSettings):
     cloakbrowser_proxy_url: str = ""
     cloakbrowser_timeout_seconds: int = 90
     cloakbrowser_wait_seconds: int = 8
+    # One browser request at a time per source; this is a polite source limit,
+    # not an attempt to evade detection.
+    cloakbrowser_min_interval_seconds: float = 2.0
+    # Source-specific headed workflows may wait for an operator to complete a
+    # visible challenge. Zero keeps generic HTML fallback fail-fast.
+    kad_manual_challenge_wait_seconds: int = 0
+    fssp_manual_challenge_wait_seconds: int = 300
     ingest_max_pages: int = 10
     ingest_page_size: int = 50
 
@@ -101,6 +116,10 @@ class Settings(BaseSettings):
     score_snapshot_retention_days: int = 180
     alert_retention_days: int = 180
     import_run_retention_days: int = 180
+    # Do not label the heuristic score as calibrated before enough resolved
+    # purchases are observed in the feedback journal.
+    calibration_min_resolved: int = 10
+    zero_lot_alert_hours: int = 6
 
     @property
     def telegram_chat_ids_list(self) -> list[str]:

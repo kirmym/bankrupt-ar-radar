@@ -637,6 +637,35 @@ class AlertState(Base):
     )
 
 
+class SourceAlertState(Base):
+    """Durable per-source health alert deduplication state."""
+
+    __tablename__ = "source_alerts_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(50))
+    alert_type: Mapped[str] = mapped_column(String(50))
+    chat_id: Mapped[str] = mapped_column(String(100))
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), default="sending")
+    alerted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "alert_type",
+            "chat_id",
+            "window_start",
+            name="uq_source_alert_window",
+        ),
+        Index("ix_source_alerts_state_status", "source", "status", "window_start"),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UserFeedback — обратная связь
 # ─────────────────────────────────────────────────────────────────────────────
@@ -649,7 +678,17 @@ class UserFeedback(Base):
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="CASCADE"))
     action: Mapped[str] = mapped_column(String(20))  # watch, reject, bought
     recovered_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    expense_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    outcome: Mapped[str | None] = mapped_column(String(20))
+    outcome_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     note: Mapped[str | None] = mapped_column(Text)
+    # Immutable decision-time snapshot used for honest calibration.
+    decision_score_class: Mapped[str | None] = mapped_column(String(2))
+    decision_score_ev: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    decision_max_bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    decision_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    decision_nominal: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    decision_score_version: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

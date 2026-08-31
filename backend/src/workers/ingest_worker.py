@@ -603,16 +603,25 @@ async def run_efrsb_ingest() -> int:
                 start_page=start_page,
             ):
                 run.items_seen += 1
+                source_name = str(item.get("source_name") or "efrsb_public")
+                source_url = item.get("source_url") or item.get("url")
                 title = item.get("title") or ""
                 description = item.get("description_text") or item.get("description")
                 props: dict[str, str] = {}
-                raw_content: str | None = None
+                raw_content = item.get("raw_content")
+                if not isinstance(raw_content, str):
+                    raw_content = None
                 detail: dict = {}
                 detail_loaded = False
                 price_intervals: list[dict] = []
                 classifier_codes: list[str] = []
                 classifier_labels: list[str] = []
-                if item.get("url"):
+                # Contract REST responses are already normalized and may point
+                # to an API host that is intentionally different from the
+                # legacy public card host.  Do not turn that URL into an
+                # uncontrolled detail request; persist the signed response as
+                # the source snapshot instead.
+                if item.get("url") and source_name != "efrsb_rest":
                     try:
                         raw_content = await fetch_page(item["url"])
                         detail = parse_lot_card(raw_content, item["url"])
@@ -682,13 +691,18 @@ async def run_efrsb_ingest() -> int:
                     if value
                 }
                 card = {
-                    "efrsb_url": item.get("url"),
+                    "source_name": source_name,
+                    "source_url": source_url,
+                    "efrsb_url": source_url if source_name == "efrsb_public" else None,
+                    "snapshot_content_type": item.get("snapshot_content_type") or "text/html",
                     "lot_no": detail.get("lot_no") or item.get("lot_no") or 1,
                     "title": title,
                     "description_text": description,
                     "start_price": start_price,
                     "nominal_claimed": nominal,
                     "raw_content": raw_content,
+                    "efrsb_trade_guid": item.get("efrsb_trade_guid"),
+                    "trade_id_on_etp": item.get("trade_id_on_etp"),
                     "debtor_inn": extract_debtor_inn(
                         description, title, exclude_inns=excluded_inns
                     ),
