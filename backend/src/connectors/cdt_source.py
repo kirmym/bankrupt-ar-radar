@@ -25,7 +25,12 @@ from src.connectors.efrsb import (
     extract_debtor_inn,
     parse_price,
 )
-from src.models.enums import DZ_CLASSIFIER_KEYWORDS, TradeKind, TradeStatus
+from src.models.enums import (
+    DZ_CLASSIFIER_KEYWORDS,
+    TradeKind,
+    is_participable_trade_status,
+    normalize_trade_status,
+)
 
 CDT_SITE_URL = "https://torgi.cdtrf.ru"
 CDT_API_URL = "https://webapi.torgi.cdtrf.ru"
@@ -82,20 +87,8 @@ def _extract_nominal(text: str) -> Decimal | None:
     return None
 
 
-def _trade_status(value: str | None) -> str:
-    normalized = (value or "").lower()
-    mapping = (
-        ("прием заявок", TradeStatus.APPLICATIONS_OPEN.value),
-        ("приём заявок", TradeStatus.APPLICATIONS_OPEN.value),
-        ("объявлен", TradeStatus.ANNOUNCED.value),
-        ("идут торги", TradeStatus.IN_PROGRESS.value),
-        ("подведение итогов", TradeStatus.IN_PROGRESS.value),
-        ("заверш", TradeStatus.COMPLETED.value),
-        ("не состоял", TradeStatus.DID_NOT_TAKE_PLACE.value),
-        ("отмен", TradeStatus.CANCELLED.value),
-        ("приостанов", TradeStatus.SUSPENDED.value),
-    )
-    return next((status for marker, status in mapping if marker in normalized), TradeStatus.ANNOUNCED.value)
+def _trade_status(value: str | None) -> str | None:
+    return normalize_trade_status(value)
 
 
 def parse_cdt_schedule(
@@ -350,7 +343,10 @@ class CdtPublicSource:
         async def load(trade_id: int) -> dict | None:
             async with semaphore:
                 detail = await self.fetch_detail(trade_id)
-                return parse_cdt_detail(detail)
+                card = parse_cdt_detail(detail)
+                if card is None or not is_participable_trade_status(card.get("trade_status")):
+                    return None
+                return card
 
         selected = trade_ids[:max_items]
         for offset in range(0, len(selected), self.detail_concurrency * 2):

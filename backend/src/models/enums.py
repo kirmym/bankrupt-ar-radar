@@ -23,6 +23,54 @@ class TradeStatus(StrEnum):
     SUSPENDED = "suspended"
 
 
+# Only these statuses mean that a buyer can still submit or execute a public
+# offer.  Unknown values are intentionally excluded until the source label is
+# mapped explicitly.
+PARTICIPABLE_TRADE_STATUSES = frozenset(
+    {
+        TradeStatus.ANNOUNCED.value,
+        TradeStatus.APPLICATIONS_OPEN.value,
+        TradeStatus.IN_PROGRESS.value,
+    }
+)
+
+
+def is_participable_trade_status(value: object) -> bool:
+    """Return whether a normalized trade status still permits participation."""
+    return isinstance(value, str) and value in PARTICIPABLE_TRADE_STATUSES
+
+
+def normalize_trade_status(value: object) -> str | None:
+    """Map Russian/source labels to the canonical trade status enum.
+
+    The mapping is deliberately conservative: a label that is not explicitly
+    understood returns ``None`` and is therefore rejected by the ingest gate.
+    """
+    text = str(value or "").strip().casefold().replace("ё", "е")
+    if not text:
+        return None
+    if text in {status.value for status in TradeStatus}:
+        return text
+    mapping = (
+        ("прием заявок заверш", TradeStatus.IN_PROGRESS.value),
+        ("приём заявок заверш", TradeStatus.IN_PROGRESS.value),
+        ("идут торги", TradeStatus.IN_PROGRESS.value),
+        ("торги идут", TradeStatus.IN_PROGRESS.value),
+        ("подведение итогов", TradeStatus.COMPLETED.value),
+        ("не состоял", TradeStatus.DID_NOT_TAKE_PLACE.value),
+        ("аннулирован", TradeStatus.CANCELLED.value),
+        ("отмен", TradeStatus.CANCELLED.value),
+        ("приостанов", TradeStatus.SUSPENDED.value),
+        ("заверш", TradeStatus.COMPLETED.value),
+        ("открыт прием заявок", TradeStatus.APPLICATIONS_OPEN.value),
+        ("открыт приём заявок", TradeStatus.APPLICATIONS_OPEN.value),
+        ("прием заявок", TradeStatus.APPLICATIONS_OPEN.value),
+        ("приём заявок", TradeStatus.APPLICATIONS_OPEN.value),
+        ("объявлен", TradeStatus.ANNOUNCED.value),
+    )
+    return next((status for marker, status in mapping if marker in text), None)
+
+
 class PersonKind(StrEnum):
     UL = "ul"  # Юрлицо
     IP = "ip"  # ИП

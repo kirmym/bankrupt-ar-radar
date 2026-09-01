@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from src.config import Settings
-from src.connectors.cdt_source import parse_cdt_detail, parse_cdt_schedule
+from src.connectors.cdt_source import _trade_status, parse_cdt_detail, parse_cdt_schedule
+from src.models.enums import TradeStatus, is_participable_trade_status
 
 
 def test_source_proxy_is_optional_and_trimmed() -> None:
@@ -31,6 +32,15 @@ def test_parse_cdt_schedule_marks_current_interval() -> None:
 
     assert [row["price"] for row in parsed] == [Decimal("5763233.23"), Decimal("4500000.00")]
     assert [row["is_current"] for row in parsed] == [False, True]
+
+
+def test_trade_status_gate_accepts_only_participable_states() -> None:
+    assert _trade_status("Объявлены торги") == TradeStatus.ANNOUNCED.value
+    assert _trade_status("Идёт приём заявок") == TradeStatus.APPLICATIONS_OPEN.value
+    assert _trade_status("Идут торги") == TradeStatus.IN_PROGRESS.value
+    assert not is_participable_trade_status(_trade_status("Подведение итогов"))
+    assert not is_participable_trade_status(_trade_status("Торги отменены"))
+    assert not is_participable_trade_status(_trade_status("неизвестная стадия"))
 
 
 def test_parse_cdt_detail_builds_seed_card() -> None:

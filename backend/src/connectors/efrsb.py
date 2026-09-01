@@ -14,6 +14,7 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from src.config import get_settings
+from src.models.enums import normalize_trade_status
 
 if TYPE_CHECKING:
     pass
@@ -615,6 +616,7 @@ def parse_legacy_public_offers(
                 "trade_number": trade_number,
                 "trade_type_label": trade_type,
                 "trade_status_label": status,
+                "trade_status": normalize_trade_status(status),
                 "row_text": row_text,
             }
         )
@@ -721,6 +723,16 @@ class EfrsbRestSource:
         trade_number = value("guid", "Guid", "tradeGuid", "TradeGuid", "id", "Id", "number", "Number")
         title = value("title", "Title", "name", "Name", "subject", "Subject")
         description = value("description", "Description", "text", "Text", "content", "Content")
+        trade_status = normalize_trade_status(
+            value(
+                "status",
+                "Status",
+                "tradeStatus",
+                "TradeStatus",
+                "tradeStatusDescription",
+                "TradeStatusDescription",
+            )
+        )
         return {
             "source_name": "efrsb_rest",
             "snapshot_content_type": "application/json",
@@ -734,6 +746,7 @@ class EfrsbRestSource:
             "trade_number": trade_number,
             "trade_id_on_etp": value("tradeId", "TradeId", "id", "Id") or None,
             "efrsb_trade_guid": value("tradeGuid", "TradeGuid", "guid", "Guid") or None,
+            "trade_status": trade_status,
             "raw_content": json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str),
         }
 
@@ -927,18 +940,42 @@ async def search_public_offers(
 
         date_el = row.css_first("time, .date, [class*='date']")
         date_text = date_el.text().strip() if date_el else ""
+        row_text = " ".join(row.text().split())
+        status_label = next(
+            (
+                value
+                for value in (
+                    "Открыт прием заявок",
+                    "Прием заявок завершен",
+                    "Идут торги",
+                    "Подведение итогов",
+                    "Завершенные",
+                    "Аннулированные",
+                    "Торги отменены",
+                    "Торги не состоялись",
+                    "Торги приостановлены",
+                    "Объявлены торги",
+                )
+                if value.casefold() in row_text.casefold()
+            ),
+            None,
+        )
 
         item_url = urljoin(f"{get_settings().efrsb_public_url.rstrip('/')}/", href)
         if urlparse(item_url).netloc != urlparse(get_settings().efrsb_public_url).netloc:
             continue
 
-        items.append({
+        item = {
             "title": title,
             "url": item_url,
             "price_text": price_text,
             "date_text": date_text,
             "source_page": page,
-        })
+        }
+        if status_label is not None:
+            item["trade_status_label"] = status_label
+            item["trade_status"] = normalize_trade_status(status_label)
+        items.append(item)
 
     return items
 

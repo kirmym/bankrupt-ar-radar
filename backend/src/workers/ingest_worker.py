@@ -43,6 +43,8 @@ from src.models.enums import (
     TradeForm,
     TradeKind,
     TradeStatus,
+    is_participable_trade_status,
+    normalize_trade_status,
 )
 from src.workers.document_lock import lock_document
 
@@ -690,6 +692,9 @@ async def run_efrsb_ingest() -> int:
                     for value in (bankrupt_inn, organizer_inn, am_inn, etp_inn)
                     if value
                 }
+                source_trade_status = item.get("trade_status") or normalize_trade_status(
+                    item.get("trade_status_label")
+                )
                 card = {
                     "source_name": source_name,
                     "source_url": source_url,
@@ -710,6 +715,7 @@ async def run_efrsb_ingest() -> int:
                     "organizer_inn": organizer_inn,
                     "am_inn": am_inn,
                     "etp_inn": etp_inn,
+                    "trade_status": source_trade_status,
                 }
                 if detail_loaded:
                     card.update(
@@ -727,7 +733,7 @@ async def run_efrsb_ingest() -> int:
                             "trade_id_on_etp": detail.get("trade_id_on_etp") or item.get("trade_id_on_etp"),
                             "etp_name": detail.get("etp_name") or item.get("etp_name"),
                             "etp_inn": detail.get("etp_inn") or item.get("etp_inn"),
-                            "trade_status": _legacy_trade_status(props),
+                            "trade_status": _legacy_trade_status(props) or source_trade_status,
                             "is_receivable": await is_receivable_lot(
                                 classifier_codes, classifier_labels, description, title
                             ),
@@ -767,16 +773,24 @@ async def run_efrsb_ingest() -> int:
                     card["trade_id_on_etp"] = item.get("trade_id_on_etp")
                     card["etp_name"] = item.get("etp_name")
                     card["etp_inn"] = item.get("etp_inn")
-                saved = await persist_trade_and_lot(card, db)
-                if saved:
-                    processed += 1
-                    run.items_upserted += 1
-                    if getattr(saved[1], "_ingest_changed", True):
-                        run.items_changed += 1
-                    else:
-                        run.items_unchanged += 1
-                else:
+                if not is_participable_trade_status(card.get("trade_status")):
                     run.items_rejected += 1
+                    logger.info(
+                        "ingest: skipping non-participable public offer %s (status=%s)",
+                        source_url,
+                        card.get("trade_status") or "unknown",
+                    )
+                else:
+                    saved = await persist_trade_and_lot(card, db)
+                    if saved:
+                        processed += 1
+                        run.items_upserted += 1
+                        if getattr(saved[1], "_ingest_changed", True):
+                            run.items_changed += 1
+                        else:
+                            run.items_unchanged += 1
+                    else:
+                        run.items_rejected += 1
                 page = int(item.get("source_page") or run.last_page or 1)
                 run.last_page = max(run.last_page, page)
                 checkpoint = await db.scalar(

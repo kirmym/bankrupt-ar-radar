@@ -7,6 +7,12 @@
 - Telegram outbox получил event/interval revision, устойчивую дедупликацию и
   безопасные HTML-сообщения без локальных ссылок и PII.
 
+## Unreleased — Этап 5
+
+- Добавлен единый gate публичных предложений: сохраняются и показываются только
+  `announced`, `applications_open` и `in_progress`; неизвестные и закрытые статусы
+  отбрасываются на нормализации, ingest и API.
+
 ## 0.3.0 (2026-08-30) — operational reliability
 
 - Added fair retry queues for enrich, ETP refresh and documents, with durable attempt metadata and PostgreSQL `SKIP LOCKED` selection.

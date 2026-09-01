@@ -38,6 +38,7 @@ from src.models.entities import (
     UserFeedback,
 )
 from src.models.enums import (
+    PARTICIPABLE_TRADE_STATUSES,
     ClaimKind,
     LotClass,
     PartyRole,
@@ -222,6 +223,7 @@ async def list_lots(
         select(Lot)
         .join(Trade, Lot.trade_id == Trade.id)
         .where(Lot.is_receivable == True)  # noqa: E712
+        .where(Trade.status.in_(PARTICIPABLE_TRADE_STATUSES))
         .options(
             selectinload(Lot.claims)
             .selectinload(Claim.debtor_party),
