@@ -46,12 +46,12 @@ def test_alert_key_changes_for_new_score_or_time_window() -> None:
     assert alert_dedupe_key(lot, "100", 20, now) != key
 
 
-def test_alert_key_changes_when_score_revision_or_price_changes() -> None:
+def test_alert_key_ignores_timestamp_but_changes_when_economics_change() -> None:
     now = datetime(2026, 8, 30, 12, tzinfo=UTC)
     lot = Lot(id=42, score_version="v1", score_updated_at=now, current_price=100)
     key = alert_dedupe_key(lot, "100", 20, now)
     lot.score_updated_at = now.replace(minute=1)
-    assert alert_dedupe_key(lot, "100", 20, now) != key
+    assert alert_dedupe_key(lot, "100", 20, now) == key
     lot.score_updated_at = now
     lot.current_price = 90
     assert alert_dedupe_key(lot, "100", 20, now) != key

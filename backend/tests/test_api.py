@@ -164,3 +164,20 @@ def test_public_parser_and_money_formatter_keep_decimal_values() -> None:
     assert parse_price("12 345,67 руб.") == Decimal("12345.67")
     assert fmt_money("12345.67") == "12 346 ₽"
     assert "EV" in fmt_lot_message({"score_ev": "12345.67", "claims": []})
+
+
+def test_telegram_message_escapes_title_and_rejects_local_links() -> None:
+    message = fmt_lot_message(
+        {
+            "title": "Лот <не проверен>",
+            "score_ev": "1.25",
+            "source_refs": [
+                {"source": "local", "source_url": "http://localhost:8000/api/v1/lots/1"},
+                {"source": "cdt", "source_url": "https://torgi.cdtrf.ru/trades/1"},
+            ],
+            "claims": [],
+        }
+    )
+    assert "&lt;не проверен&gt;" in message
+    assert "localhost" not in message
+    assert "https://torgi.cdtrf.ru/trades/1" in message

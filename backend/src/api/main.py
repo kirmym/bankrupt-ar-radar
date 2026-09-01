@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -214,6 +214,8 @@ async def list_lots(
     has_debtor: bool | None = None,
     has_court: bool | None = None,
     price_status: PriceScheduleStatus | None = None,
+    sort_by: Literal["ev", "price", "deadline", "updated"] = "ev",
+    sort_order: Literal["asc", "desc"] = "desc",
 ) -> LotListSchema:
     """Лента лотов с фильтрацией."""
     q = (
@@ -269,7 +271,14 @@ async def list_lots(
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
 
-    q = q.order_by(Lot.score_ev.desc().nullslast(), Lot.updated_at.desc())
+    sort_column = {
+        "ev": Lot.score_ev,
+        "price": Lot.current_price,
+        "deadline": Lot.current_interval_to,
+        "updated": Lot.updated_at,
+    }[sort_by]
+    ordering = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+    q = q.order_by(ordering.nullslast(), Lot.id.asc())
     q = q.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(q)
@@ -576,7 +585,8 @@ async def create_feedback(
     payload: FeedbackCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> FeedbackSchema:
-    if await db.get(Lot, payload.lot_id) is None:
+    lot = await db.get(Lot, payload.lot_id)
+    if lot is None:
         raise HTTPException(status_code=404, detail="Lot not found")
     if payload.action != "bought" and (
         payload.outcome is not None
@@ -600,9 +610,32 @@ async def create_feedback(
             status_code=422,
             detail="not_recovered outcome cannot contain a positive recovered_amount",
         )
-    lot = await db.get(Lot, payload.lot_id)
-    if lot is None:
-        raise HTTPException(status_code=404, detail="Lot not found")
+    # A later bought/outcome submission completes the open purchase record
+    # instead of creating a second purchase and biasing calibration counts.
+    if payload.action == "bought" and payload.outcome is not None:
+        existing = (
+            await db.execute(
+                select(UserFeedback)
+                .where(
+                    UserFeedback.lot_id == payload.lot_id,
+                    UserFeedback.action == "bought",
+                    or_(UserFeedback.outcome.is_(None), UserFeedback.outcome == "in_progress"),
+                )
+                .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.recovered_amount = payload.recovered_amount
+            existing.expense_amount = payload.expense_amount
+            existing.outcome = payload.outcome
+            existing.outcome_at = payload.outcome_at or datetime.now(UTC)
+            if payload.note is not None:
+                existing.note = payload.note
+            await db.commit()
+            await db.refresh(existing)
+            return FeedbackSchema.model_validate(existing, from_attributes=True)
     fb = UserFeedback(
         lot_id=payload.lot_id,
         action=payload.action,
@@ -622,6 +655,29 @@ async def create_feedback(
     await db.commit()
     await db.refresh(fb)
     return FeedbackSchema.model_validate(fb, from_attributes=True)
+
+
+@app.get(
+    "/api/v1/lots/{lot_id}/feedback",
+    response_model=list[FeedbackSchema],
+    tags=["feedback"],
+    dependencies=[Depends(require_api_access)],
+)
+async def list_lot_feedback(
+    lot_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FeedbackSchema]:
+    """Return the immutable decision/outcome history for one lot."""
+    if await db.get(Lot, lot_id) is None:
+        raise HTTPException(status_code=404, detail="Lot not found")
+    rows = (
+        await db.execute(
+            select(UserFeedback)
+            .where(UserFeedback.lot_id == lot_id)
+            .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc())
+        )
+    ).scalars().all()
+    return [FeedbackSchema.model_validate(row, from_attributes=True) for row in rows]
 
 
 @app.get(

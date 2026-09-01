@@ -31,6 +31,10 @@ export default function App() {
           <Route path="/lots/:id" element={<LotDetail />} />
         </Routes>
       </main>
+      <footer className="border-t border-slate-200 bg-white px-4 py-4 text-center text-xs text-slate-500" role="contentinfo">
+        Открытые данные и расчёты приведены для предварительного анализа и не являются
+        юридической консультацией, финансовой рекомендацией или гарантией взыскания.
+      </footer>
     </div>
   );
 }

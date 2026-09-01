@@ -8,7 +8,7 @@ from sqlalchemy import delete
 
 from src.config import get_settings
 from src.database import async_session_factory
-from src.models.entities import AlertState, ImportRun, ScoreSnapshot
+from src.models.entities import AlertState, ImportRun, ScoreSnapshot, SourceAlertState
 from src.models.enums import AlertDeliveryStatus
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ async def run_retention() -> dict[str, int]:
     needs an archival/export decision because they are audit evidence.
     """
     if settings.retention_days <= 0:
-        return {"score_snapshots": 0, "alerts": 0, "import_runs": 0}
+        return {"score_snapshots": 0, "alerts": 0, "source_alerts": 0, "import_runs": 0}
 
     now = datetime.now(UTC)
     score_cutoff = now - timedelta(days=max(1, settings.score_snapshot_retention_days))
@@ -39,6 +39,13 @@ async def run_retention() -> dict[str, int]:
                 AlertState.status == AlertDeliveryStatus.SENT.value,
             )
         )
+        source_alert_result = await session.execute(
+            delete(SourceAlertState).where(
+                SourceAlertState.sent_at.is_not(None),
+                SourceAlertState.sent_at < alert_cutoff,
+                SourceAlertState.status == "sent",
+            )
+        )
         import_result = await session.execute(
             delete(ImportRun).where(ImportRun.finished_at.is_not(None), ImportRun.finished_at < import_cutoff)
         )
@@ -46,6 +53,7 @@ async def run_retention() -> dict[str, int]:
     result = {
         "score_snapshots": int(getattr(score_result, "rowcount", 0) or 0),
         "alerts": int(getattr(alert_result, "rowcount", 0) or 0),
+        "source_alerts": int(getattr(source_alert_result, "rowcount", 0) or 0),
         "import_runs": int(getattr(import_result, "rowcount", 0) or 0),
     }
     logger.info("retention: %s", result)

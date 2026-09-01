@@ -168,10 +168,11 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/api/v1/ingest/status` | GET | Последний запуск ingest и checkpoint (с `X-API-Key`) |
 | `/api/v1/workers/status` | GET | Состояние фоновых worker-циклов (с `X-API-Key`) |
 | `/api/v1/feedback` | POST | Действие пользователя (watch/reject/bought), для bought — outcome/recovered_amount/expense_amount |
+| `/api/v1/lots/{id}/feedback` | GET | История действий и исходов по конкретному лоту |
 | `/api/v1/feedback/calibration` | GET | Отчёт по исходам взыскания и ошибке EV; до минимальной выборки статус `insufficient_data` |
 | `/docs` | GET | Swagger UI |
 
-Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`.
+Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`. Сортировка: `sort_by=ev|price|deadline|updated` и `sort_order=asc|desc`.
 
 ## Telegram-алерты
 
@@ -244,6 +245,7 @@ ruff check src/ tests/
 Подробный исполнимый план до полноценного MVP: [docs/mvp-roadmap.md](docs/mvp-roadmap.md).
 
 - Этап 3 — калибровка скоринга на реальных взысканиях
+- Этап 4 — интерфейс аналитика, полное досье и надёжная доставка сигналов
 - Прямые адаптеры крупнейших ЭТП без бесплатного API
 - ЕФРСБ: публичный parser/CloakBrowser; REST только вне бесплатного MVP
 - Больше ЭТП-адаптеров (Фабрикант)

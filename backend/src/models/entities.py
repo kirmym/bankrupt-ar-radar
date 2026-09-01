@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import date as _date
 from decimal import Decimal
 from enum import StrEnum
@@ -281,6 +281,24 @@ class Lot(Base):
         Index("ix_lots_etp_retry_at", "etp_next_retry_at"),
     )
 
+    @property
+    def data_state(self) -> str:
+        """Conservative UI state derived from score, evidence and freshness."""
+        if self.score_stop_factors:
+            return "blocked"
+        if self.score_updated_at is None:
+            return "unscored"
+        if self.score_gaps:
+            return "needs_review"
+        observed_at = self.price_observed_at
+        if observed_at is None:
+            return "stale"
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        if observed_at < utcnow() - timedelta(hours=24):
+            return "stale"
+        return "ready"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PriceInterval — шаг публичного предложения
@@ -483,7 +501,6 @@ class PartySourceCheck(Base):
         Index("ix_party_source_checks_status", "source", "status", "checked_at"),
     )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Document — документы лота
 # ─────────────────────────────────────────────────────────────────────────────
@@ -629,6 +646,9 @@ class AlertState(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(500))
+    event_type: Mapped[str] = mapped_column(String(50), default="candidate")
+    interval_version: Mapped[str | None] = mapped_column(String(100))
+    telegram_message_id: Mapped[str | None] = mapped_column(String(100))
 
     __table_args__ = (
         Index("ix_alerts_state_lot_time", "lot_id", "alerted_at"),

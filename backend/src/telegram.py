@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from html import escape
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -34,32 +36,51 @@ def fmt_class(cls: str | None) -> str:
 
 
 def fmt_lot_message(lot: dict[str, Any]) -> str:
-    """Короткое сообщение по лоту для алерта/дайджеста."""
-    claims = lot.get("claims") or [{}]
-    debtor = (claims[0] or {}).get("debtor_party") or {}
+    """Build a safe HTML message for one alert without leaking debtor PII."""
     stop_factors = lot.get("score_stop_factors") or []
+    title = str(lot.get("title") or "Лот без названия")
 
     lines = [
-        f"🚨 *Лот класса {fmt_class(lot.get('score_class'))}*",
+        f"🚨 <b>Лот класса {escape(fmt_class(lot.get('score_class')))}</b>",
+        escape(title[:500]),
         "",
-        (f"💰 EV: {fmt_money(lot.get('score_ev'))} "
+        (f"💰 EV: {escape(fmt_money(lot.get('score_ev')))} "
         f"(коридор {fmt_money(lot.get('score_ev_low'))} — {fmt_money(lot.get('score_ev_high'))})"),
-        f"🏷 Цена: {fmt_money(lot.get('current_price'))} · Max bid: {fmt_money(lot.get('score_max_bid'))}",
-        f"💼 Номинал: {fmt_money(lot.get('nominal_claimed') or lot.get('start_price'))}",
-        f"🏢 Дебитор: {debtor.get('name') or '—'} (ИНН {debtor.get('inn') or '—'})",
+        f"🏷 Цена: {escape(fmt_money(lot.get('current_price')))} · Max bid: {escape(fmt_money(lot.get('score_max_bid')))}",
+        f"💼 Номинал: {escape(fmt_money(lot.get('nominal_claimed') or lot.get('start_price')))}",
     ]
     if lot.get("current_interval_to"):
-        lines.append(f"⏰ До конца интервала: {str(lot['current_interval_to'])[:16]}")
+        lines.append(f"⏰ До конца интервала: {escape(str(lot['current_interval_to'])[:32])}")
     if stop_factors:
-        lines.append(f"⚠️ Стоп-факторы: {', '.join(str(s) for s in stop_factors)}")
-    if lot.get("efrsb_url"):
-        lines.append(f"🔗 Источник: {lot['efrsb_url']}")
+        lines.append(f"⚠️ Стоп-факторы: {escape(', '.join(str(s) for s in stop_factors))}")
+
+    urls: list[str] = []
+    for candidate in [lot.get("lot_url"), lot.get("efrsb_url")]:
+        if isinstance(candidate, str) and _safe_external_url(candidate):
+            urls.append(candidate)
+    for ref in lot.get("source_refs") or []:
+        candidate = ref.get("source_url") if isinstance(ref, dict) else None
+        if isinstance(candidate, str) and _safe_external_url(candidate):
+            urls.append(candidate)
+    for index, url in enumerate(dict.fromkeys(urls), start=1):
+        lines.append(f"🔗 Источник {index}: {escape(url)}")
 
     return "\n".join(lines)
 
 
+def _safe_external_url(value: str) -> bool:
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(host)
+        and host not in {"localhost", "127.0.0.1", "::1"}
+        and not host.startswith("127.")
+    )
+
+
 async def send_message(text: str, chat_id: str | None = None) -> bool:
-    """Шлёт сообщение во все chat_id (или в один указанный). Markdown."""
+    """Шлёт HTML-сообщение во все chat_id (или в один указанный)."""
     token = settings.telegram_bot_token
     if not token:
         logger.debug("telegram: no token, skip send")
@@ -79,7 +100,7 @@ async def send_message(text: str, chat_id: str | None = None) -> bool:
                     json={
                         "chat_id": target,
                         "text": text,
-                        "parse_mode": "Markdown",
+                        "parse_mode": "HTML",
                         "disable_web_page_preview": True,
                     },
                 )

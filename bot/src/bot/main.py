@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from decimal import Decimal
+from html import escape
+from urllib.parse import urlparse
 
 import httpx
 from aiogram import Bot, Dispatcher, types
@@ -113,24 +115,27 @@ def _is_allowed(message: types.Message) -> bool:
 async def send_alert(bot: Bot, chat_id: str, lot: dict) -> None:
     """Шлёт срочный алерт по одному лоту."""
     text = (
-        f"🚨 *Новый ликвидный лот!*\n\n"
-        f"📌 *Класс:* {fmt_class(lot.get('score_class'))}\n"
-        f"💰 *EV:* {fmt_money(lot.get('score_ev'))}\n"
-        f"📊 *Коридор EV:* {fmt_money(lot.get('score_ev_low'))} — {fmt_money(lot.get('score_ev_high'))}\n"
-        f"🏷 *Цена сейчас:* {fmt_money(lot.get('current_price'))}\n"
-        f"🎯 *Max bid:* {fmt_money(lot.get('score_max_bid'))}\n"
-        f"🛠 *Сценарий:* {fmt_scenario(lot.get('score_scenario'))}\n"
-        f"💼 *Номинал:* {fmt_money(lot.get('nominal_claimed'))}\n"
-        f"⏰ *До конца интервала:* {str(lot.get('current_interval_to') or '—')[:16]}\n\n"
+        "🚨 <b>Новый ликвидный лот!</b>\n\n"
+        f"📌 <b>Класс:</b> {escape(fmt_class(lot.get('score_class')))}\n"
+        f"💰 <b>EV:</b> {escape(fmt_money(lot.get('score_ev')))}\n"
+        f"📊 <b>Коридор EV:</b> {escape(fmt_money(lot.get('score_ev_low')))} — {escape(fmt_money(lot.get('score_ev_high')))}\n"
+        f"🏷 <b>Цена сейчас:</b> {escape(fmt_money(lot.get('current_price')))}\n"
+        f"🎯 <b>Max bid:</b> {escape(fmt_money(lot.get('score_max_bid')))}\n"
+        f"🛠 <b>Сценарий:</b> {escape(fmt_scenario(lot.get('score_scenario')))}\n"
+        f"💼 <b>Номинал:</b> {escape(fmt_money(lot.get('nominal_claimed')))}\n"
+        f"⏰ <b>До конца интервала:</b> {escape(str(lot.get('current_interval_to') or '—')[:32])}\n\n"
     )
 
     stop_factors = lot.get("score_stop_factors", [])
     if stop_factors:
-        text += f"⚠️ *Стоп-факторы:* {', '.join(stop_factors)}\n\n"
+        text += f"⚠️ <b>Стоп-факторы:</b> {escape(', '.join(str(value) for value in stop_factors))}\n\n"
 
-    text += f"🔗 [Открыть в API]({settings.api_base_url.rstrip('/')}/api/v1/lots/{lot.get('id')})"
+    api_url = f"{settings.api_base_url.rstrip('/')}/api/v1/lots/{lot.get('id')}"
+    parsed = urlparse(api_url)
+    if parsed.scheme in {"http", "https"} and parsed.hostname not in {"localhost", "backend", "127.0.0.1", "::1"}:
+        text += f"🔗 <a href=\"{escape(api_url, quote=True)}\">Открыть карточку</a>"
 
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_start(message: types.Message) -> None:

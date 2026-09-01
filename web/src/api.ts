@@ -73,6 +73,31 @@ export interface DebtorParty {
   source_checks?: PartySourceCheck[];
 }
 
+export interface DocumentRecord {
+  id: number;
+  kind?: string;
+  title?: string;
+  url?: string;
+  downloaded_at?: string;
+  text?: string;
+  processing_status: string;
+  last_error?: string;
+}
+
+export interface ScoreSnapshot {
+  id: number;
+  score_class: "A" | "B" | "C" | "D";
+  ev: string;
+  ev_low?: string;
+  ev_high?: string;
+  max_bid?: string;
+  scenario?: string;
+  stop_factors: string[];
+  gaps: string[];
+  model_version: string;
+  scored_at: string;
+}
+
 export interface PartySourceCheck {
   source: string;
   status: string;
@@ -112,6 +137,7 @@ export interface Lot {
   title?: string;
   description_text?: string;
   is_receivable: boolean;
+  data_state?: "ready" | "needs_review" | "blocked" | "stale" | "unscored" | "unknown";
   nominal_claimed?: string;
   start_price?: string;
   current_price?: string;
@@ -133,6 +159,8 @@ export interface Lot {
   price_source?: string;
   price_intervals: PriceInterval[];
   claims: Claim[];
+  documents?: DocumentRecord[];
+  score_snapshots?: ScoreSnapshot[];
   created_at: string;
   updated_at: string;
   trade?: TradeBrief;
@@ -170,6 +198,9 @@ export interface Feedback {
   lot_id: number;
   action: string;
   recovered_amount?: string;
+  expense_amount?: string;
+  outcome?: "in_progress" | "recovered" | "not_recovered";
+  outcome_at?: string;
   note?: string;
   created_at: string;
 }
@@ -203,6 +234,9 @@ export const feedbackApi = {
     lot_id: number;
     action: "watch" | "reject" | "bought";
     recovered_amount?: number;
+    expense_amount?: number;
+    outcome?: "in_progress" | "recovered" | "not_recovered";
+    outcome_at?: string;
     note?: string;
   }) => {
     try {
@@ -217,6 +251,24 @@ export const feedbackApi = {
         if (key?.trim()) {
           window.sessionStorage.setItem("ar_radar_api_key", key.trim());
           return await api.post<Feedback>("/feedback", payload);
+        }
+      }
+      throw error;
+    }
+  },
+  list: async (lotId: number) => {
+    try {
+      return await api.get<Feedback[]>(`/lots/${lotId}/feedback`);
+    } catch (error) {
+      if (
+        axios.isAxiosError(error) &&
+        error.response?.status === 401 &&
+        typeof window !== "undefined"
+      ) {
+        const key = normalizeApiKey(window.prompt("Введите API-ключ AR Radar"));
+        if (key) {
+          window.sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+          return await api.get<Feedback[]>(`/lots/${lotId}/feedback`);
         }
       }
       throw error;

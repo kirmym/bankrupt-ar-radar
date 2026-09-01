@@ -102,6 +102,7 @@ class LotSchema(BaseModel):
     title: str | None = None
     description_text: str | None = None
     is_receivable: bool = False
+    data_state: str = "unknown"
 
     nominal_claimed: Decimal | None = None
     start_price: Decimal | None = None

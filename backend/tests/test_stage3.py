@@ -10,6 +10,7 @@ import pytest
 
 from src.analytics.calibration import build_calibration_report, feedback_outcome
 from src.connectors.efrsb import EfrsbRestSource, SourceAccessError, search_public_offers_rest
+from src.models.entities import Lot
 from src.workers.alert_worker import (
     build_zero_lot_alert_message,
     source_has_zero_lot_gap,
@@ -78,6 +79,20 @@ def test_zero_lot_gap_waits_six_hours_and_ignores_recent_positive_run() -> None:
         finished_at=None,
     )
     assert source_has_zero_lot_gap([old_empty, running], now, 6) is False
+
+
+def test_lot_data_state_distinguishes_blocked_unscored_and_ready() -> None:
+    blocked = Lot(score_stop_factors=["invalid_debtor"])
+    assert blocked.data_state == "blocked"
+    unscored = Lot()
+    assert unscored.data_state == "unscored"
+    ready = Lot(
+        score_updated_at=datetime.now(UTC),
+        price_observed_at=datetime.now(UTC),
+        score_stop_factors=[],
+        score_gaps=[],
+    )
+    assert ready.data_state == "ready"
 
 
 @pytest.mark.asyncio

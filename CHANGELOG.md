@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Этап 4
+
+- Добавлены URL-состояние фильтров/сортировки, deadline-фильтр и data state в web.
+- Карточка лота показывает документы, историю score, gaps, свежесть и feedback.
+- Telegram outbox получил event/interval revision, устойчивую дедупликацию и
+  безопасные HTML-сообщения без локальных ссылок и PII.
+
 ## 0.3.0 (2026-08-30) — operational reliability
 
 - Added fair retry queues for enrich, ETP refresh and documents, with durable attempt metadata and PostgreSQL `SKIP LOCKED` selection.

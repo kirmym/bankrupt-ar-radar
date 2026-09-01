@@ -8,8 +8,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -207,18 +208,33 @@ async def send_zero_lot_alert(
 
 
 def alert_dedupe_key(lot: Lot, chat_id: str, dedupe_hours: int, now: datetime) -> str:
-    """Create a stable idempotency key per recipient and lot revision.
+    """Create a stable idempotency key for one meaningful lot revision.
 
-    The exact time window is enforced against ``sent_at`` in
-    :func:`reserve_alert_delivery`; embedding a wall-clock bucket here could
-    allow two messages a few seconds apart at a bucket boundary.
+    ``score_updated_at`` is deliberately excluded: a routine recalculation
+    must not send the same alert again. Price, deadline and score economics
+    form the revision, so a real change can produce a new event immediately.
     """
     del dedupe_hours, now
-    version = lot.score_version or "unversioned"
-    revision = lot.score_updated_at.isoformat() if lot.score_updated_at else "unscored"
-    price = str(lot.current_price) if lot.current_price is not None else "none"
-    deadline = lot.current_interval_to.isoformat() if lot.current_interval_to else "none"
-    return f"lot:{lot.id}:chat:{chat_id}:score:{version}:{revision}:price:{price}:deadline:{deadline}"
+    version = getattr(lot, "score_version", None) or "unversioned"
+    interval_from = getattr(lot, "current_interval_from", None)
+    interval_to = getattr(lot, "current_interval_to", None)
+    revision_parts = (
+        str(getattr(lot, "score_class", None) or ""),
+        str(getattr(lot, "score_ev", None) or ""),
+        str(getattr(lot, "score_max_bid", None) or ""),
+        str(getattr(lot, "current_price", None) or ""),
+        interval_from.isoformat() if isinstance(interval_from, datetime) else "",
+        interval_to.isoformat() if isinstance(interval_to, datetime) else "",
+        ",".join(sorted(str(value) for value in (getattr(lot, "score_stop_factors", None) or []))),
+        ",".join(sorted(str(value) for value in (getattr(lot, "score_gaps", None) or []))),
+    )
+    revision = sha256("|".join(revision_parts).encode("utf-8")).hexdigest()[:24]
+    return f"lot:{lot.id}:chat:{chat_id}:score:{version}:economics:{revision}"
+
+
+def alert_interval_version(lot: Lot) -> str:
+    """Return the persisted revision identifier shown in the outbox."""
+    return alert_dedupe_key(lot, "_", 0, datetime.now(UTC)).rsplit(":", 1)[-1]
 
 
 async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: int) -> int | None:
@@ -232,13 +248,7 @@ async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: 
     cutoff = now - timedelta(hours=max(0, dedupe_hours))
     existing = await session.scalar(
         select(AlertState)
-        .where(
-            or_(
-                AlertState.dedupe_key == key,
-                AlertState.dedupe_key.like(f"{key}:window:%"),
-            )
-        )
-        .where(AlertState.lot_id == lot.id, AlertState.chat_id == chat_id)
+        .where(AlertState.dedupe_key == key)
         .with_for_update(skip_locked=True)
     )
     if existing is not None:
@@ -257,6 +267,8 @@ async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: 
         existing.lease_until = now + timedelta(minutes=5)
         existing.attempts = int(existing.attempts or 0) + 1
         existing.last_error = None
+        existing.event_type = "candidate_eligible"
+        existing.interval_version = alert_interval_version(lot)
         await session.commit()
         return existing.id
 
@@ -268,6 +280,8 @@ async def reserve_alert_delivery(session, lot: Lot, chat_id: str, dedupe_hours: 
         status=AlertDeliveryStatus.SENDING.value,
         lease_until=now + timedelta(minutes=5),
         attempts=1,
+        event_type="candidate_eligible",
+        interval_version=alert_interval_version(lot),
     )
     session.add(row)
     try:
@@ -302,6 +316,7 @@ def build_alert_candidates_stmt(now: datetime, limit: int, price_freshness_hours
         .where(Lot.is_receivable == True)  # noqa: E712
         .where(Lot.score_class.in_([LotClass.A.value, LotClass.B.value]))
         .where(Lot.score_ev > 0)
+        .where(func.coalesce(func.cardinality(Lot.score_gaps), 0) == 0)
         .where(Lot.current_price.is_not(None))
         .where(
             Lot.price_schedule_status.in_(
@@ -348,7 +363,8 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
         return 0
 
     logger.info("alerts: starting")
-    sent = 0
+    health_sent = 0
+    candidate_sent = 0
 
     async with async_session_factory() as session:
         # Health alerts must still be evaluated when the latest ingest is
@@ -361,7 +377,7 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
         if not source_names:
             source_names = {settings.primary_ingest_source}
         for source_name in sorted(source_names):
-            sent += await send_zero_lot_alert(
+            health_sent += await send_zero_lot_alert(
                 session,
                 source_name,
                 settings.telegram_chat_ids_list,
@@ -380,7 +396,7 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                 settings.primary_ingest_source,
                 latest_import_status,
             )
-            return sent
+            return health_sent
 
         stmt = build_alert_candidates_stmt(
             datetime.now(UTC),
@@ -394,7 +410,7 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
         lots = result.scalars().all()
 
         for lot in lots:
-            if sent >= limit:
+            if candidate_sent >= limit:
                 break
             if lot.score_stop_factors:
                 continue
@@ -423,6 +439,19 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     "score_stop_factors": lot.score_stop_factors,
                     # Не отправляем имя/ИНН должника во внешний Telegram API.
                     "claims": [],
+                    "title": lot.title,
+                    "source_refs": [
+                        {
+                            "source": ref.source,
+                            "source_url": ref.source_url,
+                        }
+                        for ref in (lot.trade.source_refs if lot.trade else [])
+                    ],
+                    "lot_url": (
+                        lot.trade.source_refs[0].source_url
+                        if lot.trade and lot.trade.source_refs
+                        else lot.trade.efrsb_url if lot.trade else None
+                    ),
                     "efrsb_url": (
                         lot.trade.source_refs[0].source_url
                         if lot.trade and lot.trade.source_refs
@@ -431,7 +460,7 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                 }
             )
             for chat_id in settings.telegram_chat_ids_list:
-                if sent >= limit:
+                if candidate_sent >= limit:
                     break
                 delivery_id = await reserve_alert_delivery(session, lot, chat_id, dedupe_hours)
                 if delivery_id is None:
@@ -444,8 +473,9 @@ async def run_alerts(dedupe_hours: int = 20, limit: int = 5) -> int:
                     None if delivered else "Telegram API returned an unsuccessful response",
                 )
                 if delivered:
-                    sent += 1
+                    candidate_sent += 1
 
-    if sent:
-        logger.info("alerts: %d sent", sent)
-    return sent
+    total_sent = health_sent + candidate_sent
+    if total_sent:
+        logger.info("alerts: %d sent", total_sent)
+    return total_sent
