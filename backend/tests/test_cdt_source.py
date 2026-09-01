@@ -38,6 +38,7 @@ def test_trade_status_gate_accepts_only_participable_states() -> None:
     assert _trade_status("Объявлены торги") == TradeStatus.ANNOUNCED.value
     assert _trade_status("Идёт приём заявок") == TradeStatus.APPLICATIONS_OPEN.value
     assert _trade_status("Идут торги") == TradeStatus.IN_PROGRESS.value
+    assert not is_participable_trade_status(_trade_status("Приём заявок завершён"))
     assert not is_participable_trade_status(_trade_status("Подведение итогов"))
     assert not is_participable_trade_status(_trade_status("Торги отменены"))
     assert not is_participable_trade_status(_trade_status("неизвестная стадия"))

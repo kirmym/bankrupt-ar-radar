@@ -87,7 +87,7 @@ def _legacy_trade_status(props: dict[str, str]) -> str | None:
     text = " ".join(props.values()).lower()
     mapping = (
         ("открыт прием заявок", TradeStatus.APPLICATIONS_OPEN.value),
-        ("прием заявок завершен", TradeStatus.IN_PROGRESS.value),
+        ("прием заявок завершен", TradeStatus.COMPLETED.value),
         ("идут торги", TradeStatus.IN_PROGRESS.value),
         ("завершенн", TradeStatus.COMPLETED.value),
         ("аннулирован", TradeStatus.CANCELLED.value),

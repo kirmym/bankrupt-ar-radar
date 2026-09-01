@@ -52,8 +52,8 @@ def normalize_trade_status(value: object) -> str | None:
     if text in {status.value for status in TradeStatus}:
         return text
     mapping = (
-        ("прием заявок заверш", TradeStatus.IN_PROGRESS.value),
-        ("приём заявок заверш", TradeStatus.IN_PROGRESS.value),
+        ("прием заявок заверш", TradeStatus.COMPLETED.value),
+        ("приём заявок заверш", TradeStatus.COMPLETED.value),
         ("идут торги", TradeStatus.IN_PROGRESS.value),
         ("торги идут", TradeStatus.IN_PROGRESS.value),
         ("подведение итогов", TradeStatus.COMPLETED.value),
