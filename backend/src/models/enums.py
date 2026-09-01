@@ -1,4 +1,5 @@
 """Константы — enum'ы и справочники."""
+from datetime import UTC, datetime
 from enum import StrEnum
 
 
@@ -23,21 +24,59 @@ class TradeStatus(StrEnum):
     SUSPENDED = "suspended"
 
 
-# Only these statuses mean that a buyer can still submit or execute a public
-# offer.  Unknown values are intentionally excluded until the source label is
-# mapped explicitly.
+# Only these statuses are shown to users. ``in_progress`` is deliberately not
+# included: once the auction has started, a new buyer cannot submit a bid.
+# Unknown values are intentionally excluded until the source label is mapped
+# explicitly.
 PARTICIPABLE_TRADE_STATUSES = frozenset(
     {
         TradeStatus.ANNOUNCED.value,
         TradeStatus.APPLICATIONS_OPEN.value,
-        TradeStatus.IN_PROGRESS.value,
     }
 )
 
 
 def is_participable_trade_status(value: object) -> bool:
-    """Return whether a normalized trade status still permits participation."""
+    """Return whether a normalized status is eligible for user-facing output."""
     return isinstance(value, str) and value in PARTICIPABLE_TRADE_STATUSES
+
+
+def participation_exclusion_reason(
+    status: object,
+    applications_to: object,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Return a stable reason when a lot cannot be shown as actionable.
+
+    The gate fails closed. A missing/naive deadline is not treated as an open
+    application window, while a known future deadline is required for both
+    announced and application-open trades.
+    """
+    if status == TradeStatus.IN_PROGRESS.value:
+        return "trading_started"
+    if not is_participable_trade_status(status):
+        return "status_not_eligible"
+    if not isinstance(applications_to, datetime):
+        return "deadline_unknown"
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    if applications_to.tzinfo is None:
+        return "deadline_unknown"
+    if applications_to.astimezone(UTC) <= reference.astimezone(UTC):
+        return "application_deadline_passed"
+    return None
+
+
+def is_participable_trade_now(
+    status: object,
+    applications_to: object,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a trade is safe to expose as currently actionable."""
+    return participation_exclusion_reason(status, applications_to, now=now) is None
 
 
 def normalize_trade_status(value: object) -> str | None:

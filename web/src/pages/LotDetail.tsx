@@ -112,6 +112,8 @@ export default function LotDetail() {
         <Stat title="Номинал" value={fmtMoney(lot.nominal_claimed)} />
         <Stat title="Max bid" value={fmtMoney(lot.score_max_bid)} />
         <Stat title="Сценарий" value={lot.score_scenario || "—"} />
+        <Stat title="Статус торгов" value={tradeStatusLabel(lot.trade?.status)} />
+        <Stat title="Заявку можно подать до" value={fmtDate(lot.trade?.applications_to)} />
         <Stat title="Статус графика цены" value={lot.price_schedule_status || "unknown"} />
         <Stat
           title="До конца интервала"
@@ -245,7 +247,7 @@ export default function LotDetail() {
 
       <section className="bg-white p-4 rounded shadow-sm border border-slate-200">
         <h3 className="font-semibold text-slate-900">Документы</h3>
-        {lot.documents?.length ? <ul className="mt-2 space-y-2 text-sm">{lot.documents.map((document) => <li key={document.id} className="flex flex-wrap gap-2 items-center"><span>{document.title || document.kind || `Документ ${document.id}`}</span><span className="text-xs text-slate-500">({document.processing_status})</span>{document.url && <a className="text-blue-600 hover:underline" href={document.url} target="_blank" rel="noreferrer">Открыть источник</a>}{document.last_error && <span className="text-red-600">{document.last_error}</span>}</li>)}</ul> : <p className="mt-2 text-sm text-slate-500">Документы не обнаружены.</p>}
+        {lot.documents?.length ? <ul className="mt-2 space-y-2 text-sm">{lot.documents.map((document) => <li key={document.id} className="flex flex-wrap gap-2 items-center"><span>{document.title || document.kind || `Документ ${document.id}`}</span><span className="text-xs text-slate-500">({document.processing_status})</span>{Boolean(document.extracted_facts?.evidence) && <span className="text-xs text-emerald-700">есть фрагменты доказательства</span>}{document.url && <a className="text-blue-600 hover:underline" href={document.url} target="_blank" rel="noreferrer">Открыть источник</a>}{document.last_error && <span className="text-red-600">{document.last_error}</span>}</li>)}</ul> : <p className="mt-2 text-sm text-slate-500">Документы не обнаружены.</p>}
       </section>
 
       <section className="bg-white p-4 rounded shadow-sm border border-slate-200">
@@ -475,3 +477,4 @@ function OutcomeForm({ lotId, note, onSaved }: { lotId: number; note: string; on
 function dataStateLabel(value: Lot["data_state"]): string { return value === "ready" ? "готово" : value === "needs_review" ? "нужна проверка" : value === "blocked" ? "заблокировано" : value === "stale" ? "устарело" : value === "unscored" ? "не оценено" : "неизвестно"; }
 function feedbackActionLabel(value: string): string { return value === "watch" ? "В работе" : value === "reject" ? "Отклонено" : "Куплено"; }
 function feedbackOutcomeLabel(value: string): string { return value === "in_progress" ? "в процессе" : value === "recovered" ? "взыскано" : "не взыскано"; }
+function tradeStatusLabel(value?: string): string { return value === "applications_open" ? "приём заявок открыт" : value === "announced" ? "объявлены" : value || "статус неизвестен"; }

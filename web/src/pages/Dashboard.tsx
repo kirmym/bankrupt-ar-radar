@@ -40,8 +40,12 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card title="Всего лотов" value={stats.total_lots} />
         <Card title="Ликвидная ДЗ" value={stats.receivable_lots} />
+        <Card title="Можно участвовать" value={stats.active_lots} />
+        <Card title="Исключено gate" value={stats.excluded_lots} />
         <Card title="Скоринг" value={stats.scored_lots} />
         <Card title="Устаревший скоринг" value={stats.stale_scored_lots} />
+        <Card title="Готовые A/B" value={stats.ready_recommendations} />
+        <Card title="Нужна проверка" value={stats.review_candidates} />
         <Card title="Алертов сегодня" value={stats.alerts_sent_today} />
       </div>
 
@@ -55,10 +59,11 @@ export default function Dashboard() {
       <div className="bg-white p-4 rounded shadow-sm border border-slate-200">
         <h3 className="font-semibold text-slate-900">Что делать дальше</h3>
         <ul className="mt-2 text-sm text-slate-700 space-y-1 list-disc list-inside">
-          <li>Для ingest используется публичный HTML-парсер ЕФРСБ; платный API не требуется</li>
+          <li>Источник лотов: бесплатный публичный JSON ЦДТ; статус источника: <b>{stats.source_status}</b></li>
           <li>Запустите ingest: <code className="text-xs">python -m src.cli ingest</code></li>
-          <li>Обогатите дебиторов: <code className="text-xs">python -m src.cli enrich</code></li>
-          <li>Пересчитайте скоринг: <code className="text-xs">python -m src.cli score</code></li>
+          <li>Для полного цикла используйте <code className="text-xs">python -m src.cli prototype-run</code></li>
+          <li>Документы: {stats.documents_completed} готово, {stats.documents_pending} в очереди, {stats.documents_needs_review} требуют проверки</li>
+          <li>Строгие Telegram-рекомендации отправляются только для A/B без gaps; review-кандидаты проверяются вручную</li>
           <li>
             Перейдите в <Link to="/lots" className="text-blue-600 underline">ленту</Link>
           </li>

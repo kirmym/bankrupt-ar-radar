@@ -77,9 +77,11 @@ export interface DocumentRecord {
   id: number;
   kind?: string;
   title?: string;
+  external_id?: string;
   url?: string;
   downloaded_at?: string;
   text?: string;
+  extracted_facts?: Record<string, unknown>;
   processing_status: string;
   last_error?: string;
 }
@@ -157,6 +159,12 @@ export interface Lot {
   price_schedule_status?: string;
   price_observed_at?: string;
   price_source?: string;
+  trade_status?: string;
+  applications_from?: string;
+  applications_to?: string;
+  source_name?: string;
+  source_url?: string;
+  participation_exclusion_reason?: string;
   price_intervals: PriceInterval[];
   claims: Claim[];
   documents?: DocumentRecord[];
@@ -182,6 +190,8 @@ export interface TradeBrief {
   etp_url?: string;
   trade_kind: string;
   status: string;
+  applications_from?: string;
+  applications_to?: string;
   source_refs: TradeSourceRef[];
 }
 
@@ -216,6 +226,16 @@ export interface DashboardStats {
   alerts_sent_today: number;
   stale_scored_lots: number;
   last_ingest_at?: string;
+  source_status: string;
+  active_lots: number;
+  excluded_lots: number;
+  ready_recommendations: number;
+  review_candidates: number;
+  documents_total: number;
+  documents_completed: number;
+  documents_pending: number;
+  documents_needs_review: number;
+  documents_retrying: number;
 }
 
 export const lotsApi = {

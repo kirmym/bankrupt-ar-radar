@@ -7,6 +7,7 @@ type ScoreClass = "all" | "A" | "B" | "C" | "D";
 type TriState = "all" | "yes" | "no";
 type SortBy = "ev" | "price" | "deadline" | "updated";
 type SortOrder = "asc" | "desc";
+type LotView = "active" | "review" | "ready";
 
 export default function LotList() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -22,6 +23,7 @@ export default function LotList() {
   const hasDebtor = asTriState(searchParams.get("has_debtor"));
   const hasCourt = asTriState(searchParams.get("has_court"));
   const deadlineBefore = searchParams.get("deadline_before") || "";
+  const view = asLotView(searchParams.get("view"));
   const sortBy = asSortBy(searchParams.get("sort_by"));
   const sortOrder = asSortOrder(searchParams.get("sort_order"));
   const pageValue = Number(searchParams.get("page") || 1);
@@ -40,7 +42,7 @@ export default function LotList() {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const params: Record<string, unknown> = { page, page_size: 20, price_status: "parsed", sort_by: sortBy, sort_order: sortOrder };
+    const params: Record<string, unknown> = { page, page_size: 20, view, sort_by: sortBy, sort_order: sortOrder };
     if (filter !== "all") params.score_class = filter;
     if (search.trim()) params.search = search.trim();
     if (etpName.trim()) params.etp_name = etpName.trim();
@@ -60,7 +62,7 @@ export default function LotList() {
       setTotal(0);
       setError(reason instanceof Error ? reason.message : "Не удалось загрузить лоты");
     }).finally(() => setLoading(false));
-  }, [filter, page, search, etpName, hasDebtor, hasCourt, deadlineBefore, sortBy, sortOrder]);
+  }, [filter, page, search, etpName, hasDebtor, hasCourt, deadlineBefore, sortBy, sortOrder, view]);
 
   return (
     <div className="space-y-4">
@@ -81,15 +83,21 @@ export default function LotList() {
         <div className="flex gap-1" role="group" aria-label="Класс скоринга">
           {(["all", "A", "B", "C", "D"] as const).map((value) => <button type="button" key={value} aria-pressed={filter === value} onClick={() => updateParam("score_class", value === "all" ? "" : value)} className={`px-3 py-1.5 text-sm rounded ${filter === value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>{value === "all" ? "Все" : `Класс ${value}`}</button>)}
         </div>
-        <label className="text-sm text-slate-600 flex items-center gap-2">До дедлайна
-          <input aria-label="Дедлайн до" type="datetime-local" className="px-2 py-1.5 border border-slate-300 rounded text-sm" value={deadlineBefore} onChange={(event) => updateParam("deadline_before", event.target.value)} />
+        <label className="text-sm text-slate-600 flex items-center gap-2">Заявка до
+          <input aria-label="Срок подачи заявки до" type="datetime-local" className="px-2 py-1.5 border border-slate-300 rounded text-sm" value={deadlineBefore} onChange={(event) => updateParam("deadline_before", event.target.value)} />
         </label>
+        <div className="flex gap-1" role="group" aria-label="Представление ленты">
+          {(["active", "review", "ready"] as const).map((value) => {
+            const labels = { active: "Все доступные", review: "Нужна проверка", ready: "Готовые A/B" };
+            return <button type="button" key={value} aria-pressed={view === value} onClick={() => updateParam("view", value === "active" ? "" : value)} className={`px-3 py-1.5 text-sm rounded ${view === value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>{labels[value]}</button>;
+          })}
+        </div>
         <label className="text-sm text-slate-600 flex items-center gap-2">Сортировка
           <select aria-label="Сортировка лотов" className="px-2 py-1.5 border border-slate-300 rounded text-sm" value={`${sortBy}:${sortOrder}`} onChange={(event) => {
             const [nextBy, nextOrder] = event.target.value.split(":");
             setSearchParams((previous) => { const next = new URLSearchParams(previous); next.set("sort_by", nextBy); next.set("sort_order", nextOrder); next.delete("page"); return next; }, { replace: true });
           }}>
-            <option value="ev:desc">EV: сначала выше</option><option value="ev:asc">EV: сначала ниже</option><option value="price:asc">Цена: сначала ниже</option><option value="price:desc">Цена: сначала выше</option><option value="deadline:asc">Дедлайн: ближайшие</option><option value="updated:desc">Обновление: новые</option>
+            <option value="ev:desc">EV: сначала выше</option><option value="ev:asc">EV: сначала ниже</option><option value="price:asc">Цена: сначала ниже</option><option value="price:desc">Цена: сначала выше</option><option value="deadline:asc">Заявка: ближайшие</option><option value="updated:desc">Обновление: новые</option>
           </select>
         </label>
         <button type="button" className="px-3 py-1.5 text-sm rounded bg-slate-100 text-slate-700 hover:bg-slate-200" onClick={() => setSearchParams({}, { replace: true })}>Сбросить</button>
@@ -112,7 +120,7 @@ function LotRow({ lot }: { lot: Lot }) {
   const debtor = lot.claims?.[0]?.debtor_party;
   const ev = lot.score_ev ? parseFloat(lot.score_ev) : 0;
   const evDisplay = ev < 0 ? "минус" : fmtMoney(lot.score_ev);
-  return <Link to={`/lots/${lot.id}`} className="block bg-white p-4 rounded shadow-sm border border-slate-200 hover:shadow-md transition-shadow"><div className="flex items-center gap-4"><span className={`badge badge-${cls} text-base`}>{cls}</span><div className="flex-1 min-w-0"><div className="font-medium text-slate-900 truncate">{lot.title || `Лот №${lot.lot_no}`}</div><div className="text-xs text-slate-500 mt-0.5">{debtor ? <>Дебитор: {debtor.name || "—"} · ИНН {debtor.inn || "—"}</> : <span className="text-orange-600">⚠️ ИНН дебитора не извлечён</span>}</div><div className="text-xs text-slate-500 mt-1">Состояние данных: {dataStateLabel(lot.data_state)}</div></div><div className="text-right"><div className="text-lg font-bold text-slate-900">{evDisplay}</div><div className="text-xs text-slate-500">EV</div></div><div className="text-right"><div className="text-sm font-medium text-slate-700">{fmtMoney(lot.current_price)}</div><div className="text-xs text-slate-500">текущая цена</div></div><div className="text-right w-32"><div className="text-sm font-medium text-slate-700">{fmtRelative(lot.current_interval_to)}</div><div className="text-xs text-slate-500">до конца шага</div></div></div></Link>;
+  return <Link to={`/lots/${lot.id}`} className="block bg-white p-4 rounded shadow-sm border border-slate-200 hover:shadow-md transition-shadow"><div className="flex items-center gap-4"><span className={`badge badge-${cls} text-base`}>{cls}</span><div className="flex-1 min-w-0"><div className="font-medium text-slate-900 truncate">{lot.title || `Лот №${lot.lot_no}`}</div><div className="text-xs text-slate-500 mt-0.5">{debtor ? <>Дебитор: {debtor.name || "—"} · ИНН {debtor.inn || "—"}</> : <span className="text-orange-600">⚠️ ИНН дебитора не извлечён</span>}</div><div className="text-xs text-slate-500 mt-1">{lot.source_name || "источник не указан"} · {tradeStatusLabel(lot.trade_status)} · данные: {dataStateLabel(lot.data_state)}</div></div><div className="text-right"><div className="text-lg font-bold text-slate-900">{evDisplay}</div><div className="text-xs text-slate-500">EV</div></div><div className="text-right"><div className="text-sm font-medium text-slate-700">{fmtMoney(lot.current_price)}</div><div className="text-xs text-slate-500">текущая цена</div></div><div className="text-right w-44"><div className="text-sm font-medium text-slate-700">{fmtRelative(lot.applications_to)}</div><div className="text-xs text-slate-500">заявка до {lot.applications_to ? new Date(lot.applications_to).toLocaleDateString("ru-RU") : "—"}</div><div className="text-xs text-slate-400">интервал до {fmtRelative(lot.current_interval_to)}</div></div></div></Link>;
 }
 
 function EmptyState() {
@@ -123,4 +131,6 @@ function asScoreClass(value: string | null): ScoreClass { return value && ["A", 
 function asTriState(value: string | null): TriState { return value === "true" ? "yes" : value === "false" ? "no" : "all"; }
 function asSortBy(value: string | null): SortBy { return value && ["ev", "price", "deadline", "updated"].includes(value) ? value as SortBy : "ev"; }
 function asSortOrder(value: string | null): SortOrder { return value === "asc" ? "asc" : "desc"; }
+function asLotView(value: string | null): LotView { return value === "review" || value === "ready" ? value : "active"; }
+function tradeStatusLabel(value?: string): string { return value === "applications_open" ? "приём заявок открыт" : value === "announced" ? "объявлены" : value || "статус неизвестен"; }
 function dataStateLabel(value: Lot["data_state"]): string { return value === "ready" ? "готово" : value === "needs_review" ? "нужна проверка" : value === "blocked" ? "заблокировано" : value === "stale" ? "устарело" : value === "unscored" ? "не оценено" : "неизвестно"; }

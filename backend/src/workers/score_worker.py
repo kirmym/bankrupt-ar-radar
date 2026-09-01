@@ -10,8 +10,8 @@ from sqlalchemy.orm import selectinload
 
 from src.config import get_settings
 from src.database import async_session_factory
-from src.models.entities import Claim, Lot, Party, ScoreSnapshot
-from src.models.enums import Gap, PriceScheduleStatus
+from src.models.entities import Claim, Lot, Party, ScoreSnapshot, Trade
+from src.models.enums import PARTICIPABLE_TRADE_STATUSES, Gap, PriceScheduleStatus
 from src.schemas.lot import ClaimSchema, DebtorPartySchema
 from src.scoring.v1 import ScoreInput, _claim_rank, compute_ev_and_class
 
@@ -21,9 +21,14 @@ settings = get_settings()
 
 async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
     """Пересчитывает скоринг одного лота и сохраняет снимок."""
+    now = datetime.now(UTC)
     stmt = (
         select(Lot)
         .where(Lot.id == lot_id)
+        .join(Trade, Lot.trade_id == Trade.id)
+        .where(Trade.status.in_(PARTICIPABLE_TRADE_STATUSES))
+        .where(Trade.applications_to.is_not(None))
+        .where(Trade.applications_to > now)
         .options(
             selectinload(Lot.claims).selectinload(Claim.debtor_party),
             selectinload(Lot.claims).selectinload(Claim.guarantor_party),
@@ -79,7 +84,7 @@ async def score_lot(lot_id: int, session) -> ScoreSnapshot | None:
     result = compute_ev_and_class(inp)
 
     # Сохраняем снимок
-    scored_at = datetime.now(UTC)
+    scored_at = now
     snapshot = ScoreSnapshot(
         lot_id=lot.id,
         score_class=result.score_class.value,
@@ -121,7 +126,11 @@ async def run_rescore() -> int:
     async with async_session_factory() as session:
         stmt = (
             select(Lot.id)
+            .join(Trade, Lot.trade_id == Trade.id)
             .where(Lot.is_receivable == True)  # noqa: E712
+            .where(Trade.status.in_(PARTICIPABLE_TRADE_STATUSES))
+            .where(Trade.applications_to.is_not(None))
+            .where(Trade.applications_to > datetime.now(UTC))
             .where(
                 (Lot.score_updated_at.is_(None))
                 | (Lot.score_updated_at < Lot.updated_at)

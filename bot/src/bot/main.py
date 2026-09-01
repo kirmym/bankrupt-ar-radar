@@ -33,10 +33,15 @@ class ApiLot(BaseModel):
     score_scenario: str | None = None
     nominal_claimed: Decimal | None = None
     current_interval_to: str | None = None
+    applications_to: str | None = None
+    trade_status: str | None = None
+    title: str | None = None
+    source_name: str | None = None
     price_schedule_status: str | None = None
     price_observed_at: str | None = None
     score_updated_at: str | None = None
     score_stop_factors: list[str] = Field(default_factory=list)
+    score_gaps: list[str] = Field(default_factory=list)
 
 
 class ApiLotList(BaseModel):
@@ -75,7 +80,7 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
         headers = {"X-API-Key": settings.api_auth_token} if settings.api_auth_token else {}
         lots: list[dict] = []
         for score_class in ("A", "B"):
-            for trade_status in ("announced", "applications_open", "in_progress"):
+            for trade_status in ("announced", "applications_open"):
                 resp = await client.get(
                     f"{base_url.rstrip('/')}/api/v1/lots",
                     params={
@@ -103,6 +108,20 @@ async def fetch_lots_a_b(base_url: str, limit: int = 10) -> list[dict]:
             key=lambda lot: Decimal(str(lot.get("score_ev") or 0)),
             reverse=True,
         )[:limit]
+
+
+async def fetch_lots_review(base_url: str, limit: int = 10) -> list[dict]:
+    """Fetch participate-able candidates that still need manual checks."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        headers = {"X-API-Key": settings.api_auth_token} if settings.api_auth_token else {}
+        resp = await client.get(
+            f"{base_url.rstrip('/')}/api/v1/lots",
+            params={"page": 1, "page_size": limit, "view": "review", "sort_by": "deadline", "sort_order": "asc"},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        payload = ApiLotList.model_validate(resp.json())
+        return [item.model_dump(mode="json") for item in payload.items[:limit]]
 
 
 def _is_allowed(message: types.Message) -> bool:
@@ -176,6 +195,30 @@ async def cmd_top(message: types.Message) -> None:
     await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_review(message: types.Message) -> None:
+    if not _is_allowed(message):
+        return
+    try:
+        lots = await fetch_lots_review(settings.api_base_url, limit=10)
+    except (httpx.HTTPError, ValidationError, ValueError, ArithmeticError) as e:
+        await message.answer(f"❌ Не удалось получить review-кандидатов: {e}")
+        return
+    if not lots:
+        await message.answer("Нет кандидатов: проверьте импорт, цену и срок подачи заявки.")
+        return
+    lines = ["🔎 *Кандидаты на ручную проверку:*\n"]
+    for lot in lots:
+        gaps = ", ".join(str(value) for value in lot.get("score_gaps", [])) or "—"
+        title = str(lot.get("title") or f"Лот {lot.get('id')}")
+        lines.append(
+            f"{fmt_class(lot.get('score_class'))} *{title}*\n"
+            f"EV={fmt_money(lot.get('score_ev'))}, цена={fmt_money(lot.get('current_price'))}\n"
+            f"Заявка до: {str(lot.get('applications_to') or '—')[:16]}\n"
+            f"Пробелы: {gaps}\n"
+        )
+    await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_help(message: types.Message) -> None:
     if not _is_allowed(message):
         return
@@ -186,6 +229,7 @@ async def cmd_help(message: types.Message) -> None:
         "Команды:\n"
         "/start — приветствие\n"
         "/top — топ лотов\n"
+        "/review — кандидаты на ручную проверку\n"
         "/help — эта справка",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -203,6 +247,7 @@ async def main() -> None:
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_top, Command("top"))
+    dp.message.register(cmd_review, Command("review"))
     dp.message.register(cmd_help, Command("help"))
 
     logger.info("Bot starting…")

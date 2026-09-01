@@ -15,6 +15,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# OCR runtime for scanned PDF evidence (bounded by the Python parser).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        poppler-utils \
+        tesseract-ocr \
+        tesseract-ocr-rus \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=uv /uv /uvx /bin/
 
 # Создаём непривилегированного пользователя до установки Python-пакетов.

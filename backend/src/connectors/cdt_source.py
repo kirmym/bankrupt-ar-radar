@@ -28,7 +28,6 @@ from src.connectors.efrsb import (
 from src.models.enums import (
     DZ_CLASSIFIER_KEYWORDS,
     TradeKind,
-    is_participable_trade_status,
     normalize_trade_status,
 )
 
@@ -41,6 +40,67 @@ CDT_RECEIVABLE_CATEGORY_LABELS = {
     53: "Смешанная задолженность",
 }
 MOSCOW_TZ = timezone(timedelta(hours=3))
+_CDT_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def cdt_document_file_url(doc_id: str, file_id: str, trade_id: int | str | None = None) -> str:
+    """Build the public CDT file URL used by the site's document viewer."""
+    url = f"{CDT_API_URL}/Doc/public/file?DocId={doc_id}&FileId={file_id}"
+    if trade_id is not None:
+        url += f"&tradeId={trade_id}"
+    return url
+
+
+def parse_cdt_document_metadata(
+    payload: dict[str, Any], *, trade_id: int | str | None = None
+) -> list[dict[str, str]]:
+    """Convert ``Doc/public`` metadata into canonical document descriptors."""
+    doc_id = str(payload.get("docId") or "").strip()
+    if not doc_id:
+        return []
+    title = str(payload.get("docName") or payload.get("docTypeName") or "document").strip()
+    kind = str(payload.get("docType") or "other").strip()[:50]
+    result: list[dict[str, str]] = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("docFileId") or "").strip()
+        if not file_id:
+            continue
+        file_name = str(item.get("fileName") or title).strip()
+        result.append(
+            {
+                "url": cdt_document_file_url(doc_id, file_id, trade_id),
+                "title": file_name[:300],
+                "kind": kind,
+                "external_id": file_id,
+            }
+        )
+    return result
+
+
+def _cdt_document_descriptors(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Collect document IDs from both ``docs`` and legacy top-level fields."""
+    descriptors: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in payload.get("docs") or []:
+        if not isinstance(item, dict):
+            continue
+        doc_id = str(item.get("id") or item.get("documentID") or "").strip()
+        if doc_id and doc_id not in seen:
+            seen.add(doc_id)
+            descriptors.append(item | {"id": doc_id})
+    for key, value in payload.items():
+        key_lc = key.lower()
+        if "doc" not in key_lc or not key_lc.endswith("id"):
+            continue
+        doc_id = str(value or "").strip()
+        if not _CDT_UUID_RE.fullmatch(doc_id) or doc_id in seen:
+            continue
+        name_key = f"{key[:-2]}Name"
+        seen.add(doc_id)
+        descriptors.append({"id": doc_id, "name": str(payload.get(name_key) or "document")})
+    return descriptors
 
 
 def _plain_text(value: str | None) -> str:
@@ -310,6 +370,13 @@ class CdtPublicSource:
     async def fetch_detail(self, trade_id: int) -> dict[str, Any]:
         return await self._get_json(f"/Trade/public/{trade_id}")
 
+    async def fetch_document_metadata(self, doc_id: str) -> dict[str, Any] | None:
+        """Return public file metadata; unavailable documents are skipped safely."""
+        try:
+            return await self._get_json("/Doc/public/", {"DocId": doc_id})
+        except (SourceAccessError, SourceParseError):
+            return None
+
     async def iter_receivables(
         self,
         *,
@@ -333,9 +400,11 @@ class CdtPublicSource:
                         seen.add(trade_id)
                         trade_ids.append(trade_id)
                 total = int(payload.get("totalCount") or 0)
-                if not items or page * per_page >= total or len(trade_ids) >= max_items:
+                if not items or page * per_page >= total or (
+                    max_items > 0 and len(trade_ids) >= max_items
+                ):
                     break
-            if len(trade_ids) >= max_items:
+            if max_items > 0 and len(trade_ids) >= max_items:
                 break
 
         semaphore = asyncio.Semaphore(self.detail_concurrency)
@@ -344,11 +413,20 @@ class CdtPublicSource:
             async with semaphore:
                 detail = await self.fetch_detail(trade_id)
                 card = parse_cdt_detail(detail)
-                if card is None or not is_participable_trade_status(card.get("trade_status")):
+                if card is None:
                     return None
+                documents: list[dict[str, str]] = list(card.get("documents") or [])
+                for descriptor in _cdt_document_descriptors(detail):
+                    doc_id = descriptor["id"]
+                    metadata = await self.fetch_document_metadata(doc_id)
+                    if metadata:
+                        documents.extend(
+                            parse_cdt_document_metadata(metadata, trade_id=trade_id)
+                        )
+                card["documents"] = documents
                 return card
 
-        selected = trade_ids[:max_items]
+        selected = trade_ids if max_items <= 0 else trade_ids[:max_items]
         for offset in range(0, len(selected), self.detail_concurrency * 2):
             batch = selected[offset : offset + self.detail_concurrency * 2]
             cards = await asyncio.gather(*(load(trade_id) for trade_id in batch))

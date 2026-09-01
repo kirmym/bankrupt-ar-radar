@@ -3,7 +3,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from src.config import Settings
-from src.connectors.cdt_source import _trade_status, parse_cdt_detail, parse_cdt_schedule
+from src.connectors.cdt_source import (
+    _cdt_document_descriptors,
+    _trade_status,
+    cdt_document_file_url,
+    parse_cdt_detail,
+    parse_cdt_document_metadata,
+    parse_cdt_schedule,
+)
 from src.models.enums import TradeStatus, is_participable_trade_status
 
 
@@ -117,3 +124,38 @@ def test_parse_cdt_detail_extracts_general_total_and_accepts_naive_now() -> None
     assert card is not None
     assert card["nominal_claimed"] == Decimal("124005470.04")
     assert card["price_observed_at"].tzinfo is UTC
+
+
+def test_parse_cdt_document_metadata_builds_public_file_url() -> None:
+    metadata = {
+        "docId": "doc-1",
+        "docType": "Code4002",
+        "docName": "Договор о задатке",
+        "items": [{"docFileId": "file-1", "fileName": "deposit.pdf"}],
+    }
+    docs = parse_cdt_document_metadata(metadata, trade_id=365167)
+    assert docs == [
+        {
+            "url": cdt_document_file_url("doc-1", "file-1", 365167),
+            "title": "deposit.pdf",
+            "kind": "Code4002",
+            "external_id": "file-1",
+        }
+    ]
+
+
+def test_cdt_document_descriptors_include_legacy_top_level_ids() -> None:
+    descriptors = _cdt_document_descriptors(
+        {
+            "docs": [],
+            "doc4002ID": "2f55b7da-134d-4a6f-94f7-0d64eda7de33",
+            "doc4002Name": "Договор о задатке",
+            "tradeId": 365167,
+        }
+    )
+    assert descriptors == [
+        {
+            "id": "2f55b7da-134d-4a6f-94f7-0d64eda7de33",
+            "name": "Договор о задатке",
+        }
+    ]

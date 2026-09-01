@@ -43,8 +43,9 @@ from src.models.enums import (
     TradeForm,
     TradeKind,
     TradeStatus,
-    is_participable_trade_status,
+    is_participable_trade_now,
     normalize_trade_status,
+    participation_exclusion_reason,
 )
 from src.workers.document_lock import lock_document
 
@@ -257,6 +258,16 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
     trade_status = card.get("trade_status")
     if trade_status in {item.value for item in TradeStatus}:
         trade.status = trade_status
+    else:
+        # Never retain a previously eligible status when the source stopped
+        # providing a known status. Unknown is intentionally rejected by the
+        # API/score/alert gates until the mapping is fixed.
+        trade.status = str(trade_status or "unknown")[:30]
+    trade.last_seen_at = datetime.now(UTC)
+    trade.participation_exclusion_reason = participation_exclusion_reason(
+        trade_status,
+        card.get("applications_to"),
+    )
 
     for field in (
         "efrsb_trade_guid",
@@ -469,6 +480,8 @@ async def persist_trade_and_lot(card: dict, db) -> tuple[Trade, Lot] | None:
         if document is None:
             document = Document(lot_id=lot.id, url=file_url)
             db.add(document)
+        if file_data.get("external_id") is not None:
+            document.external_id = str(file_data["external_id"])[:200]
         for field in ("kind", "title"):
             if file_data.get(field) is not None:
                 setattr(document, field, str(file_data[field])[:300 if field == "title" else 50])
@@ -773,24 +786,26 @@ async def run_efrsb_ingest() -> int:
                     card["trade_id_on_etp"] = item.get("trade_id_on_etp")
                     card["etp_name"] = item.get("etp_name")
                     card["etp_inn"] = item.get("etp_inn")
-                if not is_participable_trade_status(card.get("trade_status")):
+                eligible = is_participable_trade_now(
+                    card.get("trade_status"), card.get("applications_to")
+                )
+                saved = await persist_trade_and_lot(card, db)
+                if not eligible:
                     run.items_rejected += 1
                     logger.info(
                         "ingest: skipping non-participable public offer %s (status=%s)",
                         source_url,
                         card.get("trade_status") or "unknown",
                     )
-                else:
-                    saved = await persist_trade_and_lot(card, db)
-                    if saved:
-                        processed += 1
-                        run.items_upserted += 1
-                        if getattr(saved[1], "_ingest_changed", True):
-                            run.items_changed += 1
-                        else:
-                            run.items_unchanged += 1
+                elif saved:
+                    processed += 1
+                    run.items_upserted += 1
+                    if getattr(saved[1], "_ingest_changed", True):
+                        run.items_changed += 1
                     else:
-                        run.items_rejected += 1
+                        run.items_unchanged += 1
+                else:
+                    run.items_rejected += 1
                 page = int(item.get("source_page") or run.last_page or 1)
                 run.last_page = max(run.last_page, page)
                 checkpoint = await db.scalar(
@@ -845,6 +860,7 @@ async def run_cdt_ingest() -> int:
 
     source_name = "cdt_public"
     processed = 0
+    seen_external_ids: set[str] = set()
     logger.info("ingest: starting CDT public source")
     async with get_db_context() as db:
         run = ImportRun(source=source_name, status="running")
@@ -863,8 +879,13 @@ async def run_cdt_ingest() -> int:
                     max_items=settings.cdt_ingest_max_items,
                 ):
                     run.items_seen += 1
+                    if card.get("trade_id_on_etp"):
+                        seen_external_ids.add(str(card["trade_id_on_etp"]))
                     saved = await persist_trade_and_lot(card, db)
-                    if saved:
+                    eligible = is_participable_trade_now(
+                        card.get("trade_status"), card.get("applications_to")
+                    )
+                    if saved and eligible:
                         processed += 1
                         run.items_upserted += 1
                         if getattr(saved[1], "_ingest_changed", True):
@@ -873,7 +894,7 @@ async def run_cdt_ingest() -> int:
                             run.items_unchanged += 1
                     else:
                         run.items_rejected += 1
-                    run.last_page = processed
+                    run.last_page = run.items_seen
                     checkpoint = await db.scalar(
                         select(ImportCheckpoint).where(ImportCheckpoint.source == source_name)
                     )
@@ -883,6 +904,29 @@ async def run_cdt_ingest() -> int:
                     checkpoint.cursor = str(card.get("trade_id_on_etp") or processed)
                     checkpoint.updated_at = datetime.now(UTC)
                     await db.commit()
+            # A successful non-empty full scan is authoritative. Close CDT
+            # trades that disappeared from the current public catalogue, but
+            # never do this after an empty/partial source response.
+            if seen_external_ids:
+                stale_trades = (
+                    await db.execute(
+                        select(Trade)
+                        .join(TradeSourceRef, TradeSourceRef.trade_id == Trade.id)
+                        .where(TradeSourceRef.source == source_name)
+                        .where(
+                            TradeSourceRef.external_trade_id.not_in(seen_external_ids)
+                        )
+                        .where(TradeSourceRef.captured_at < run.started_at)
+                        .where(Trade.status.in_(
+                            {TradeStatus.ANNOUNCED.value, TradeStatus.APPLICATIONS_OPEN.value}
+                        ))
+                    )
+                ).scalars().unique().all()
+                for stale_trade in stale_trades:
+                    stale_trade.status = TradeStatus.COMPLETED.value
+                    stale_trade.participation_exclusion_reason = "not_seen_in_source"
+                if stale_trades:
+                    logger.info("ingest: closed %d CDT trades missing from catalogue", len(stale_trades))
             run.status = "finished"
             run.finished_at = datetime.now(UTC)
             await db.commit()

@@ -57,6 +57,9 @@ jobs:
       - name: Apply migrations on PostgreSQL
         run: uv run alembic upgrade head
 
+      - name: Check ORM and migration schema are aligned
+        run: uv run alembic check
+
       - name: Build wheel
         run: uv run python -m hatchling build -t wheel
 

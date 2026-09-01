@@ -45,6 +45,7 @@ Thumbs.db
 data/
 logs/
 *.log
+outputs/*.json
 
 # Docker
 docker-compose.override.yml

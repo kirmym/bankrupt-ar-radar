@@ -1,6 +1,7 @@
 """Regression tests for API safety and source diagnostics."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.diagnostics import _check
-from src.api.main import app, readiness, safe_static_file
+from src.api.main import _list_item_payload, app, readiness, safe_static_file
 from src.api.security import require_api_access
 from src.connectors.efrsb import parse_lot_card, parse_price
 from src.models.enums import TradeKind, TradeStatus
@@ -181,3 +182,37 @@ def test_telegram_message_escapes_title_and_rejects_local_links() -> None:
     assert "&lt;не проверен&gt;" in message
     assert "localhost" not in message
     assert "https://torgi.cdtrf.ru/trades/1" in message
+
+
+def test_list_item_exposes_participation_and_source_summary() -> None:
+    now = datetime.now(UTC)
+    trade = SimpleNamespace(
+        status=TradeStatus.APPLICATIONS_OPEN.value,
+        applications_from=now,
+        applications_to=now + timedelta(days=2),
+        participation_exclusion_reason=None,
+        source_refs=[
+            SimpleNamespace(
+                source="cdt_public",
+                source_url="https://torgi.cdtrf.ru/trades/1",
+            )
+        ],
+        efrsb_url=None,
+        etp_url=None,
+        etp_name=None,
+    )
+    lot = SimpleNamespace(
+        id=1,
+        guid=uuid4(),
+        lot_no=1,
+        created_at=now,
+        updated_at=now,
+        trade=trade,
+    )
+
+    payload = _list_item_payload(lot)  # type: ignore[arg-type]
+
+    assert payload.trade_status == TradeStatus.APPLICATIONS_OPEN
+    assert payload.applications_to == trade.applications_to
+    assert payload.source_name == "cdt_public"
+    assert payload.source_url == trade.source_refs[0].source_url

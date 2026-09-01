@@ -15,6 +15,7 @@ from src.connectors.files import (
     extract_ogrn_from_text,
     extract_sums,
     extract_text_from_pdf,
+    extract_text_with_ocr,
     propose_fact_updates,
 )
 from src.connectors.llm import extract_facts_with_llm, validate_llm_facts
@@ -34,6 +35,10 @@ def test_extract_inn_unique():
     text = "ИНН 7707083893 ИНН 7707083893"
     inns = extract_inn_from_text(text)
     assert len(inns) == 1
+
+
+def test_ocr_fallback_is_safe_for_non_pdf():
+    assert extract_text_with_ocr(b"plain text", "text/plain") == ""
 
 
 def test_extract_ogrn():
@@ -88,6 +93,21 @@ def test_extract_facts_respects_simple_negations():
     assert facts["has_writ"] is False
     assert facts["has_secured"] is False
     assert facts["has_assignment_forbidden"] is False
+
+
+def test_extract_facts_keeps_missing_legal_evidence_unknown():
+    facts = extract_facts_from_text("Договор поставки №42. Задолженность 100 000 руб.")
+    assert facts["has_judgment"] is None
+    assert facts["has_writ"] is None
+    assert facts["has_secured"] is None
+    assert facts["has_assignment_forbidden"] is None
+    assert facts["evidence"] == {}
+
+
+def test_extract_facts_keeps_positive_evidence_snippet():
+    facts = extract_facts_from_text("Решение суда вступило в законную силу 01.02.2024")
+    assert facts["has_judgment"] is True
+    assert "решение суда" in facts["evidence"]["has_judgment"]["snippet"]
 
 
 def test_extract_facts_court_case():
@@ -157,6 +177,7 @@ def test_flat_regex_facts_are_converted_into_claim_and_debtor_proposal():
 def test_document_adapter_is_selected_by_allowlisted_host():
     assert adapter_for_document_url("https://elektortorgi.ru/file.pdf") is CdtAdapter
     assert adapter_for_document_url("https://utp.sberbank-ast.ru/File/a.pdf").__name__ == "SberbankAdapter"
+    assert adapter_for_document_url("https://webapi.torgi.cdtrf.ru/Doc/public/file?DocId=x&FileId=y").__name__ == "CdtDocumentAdapter"
     assert adapter_for_document_url("https://example.invalid/file.pdf") is None
 
 
@@ -222,6 +243,64 @@ async def test_download_error_is_deferred_with_exponential_backoff(monkeypatch: 
     assert doc.download_attempts == 1
     assert doc.next_retry_at is not None
     assert doc.last_error == "RuntimeError: temporary upstream failure"
+
+
+@pytest.mark.asyncio
+async def test_completed_external_document_is_reused_without_download(monkeypatch: pytest.MonkeyPatch):
+    cached = Document(
+        id=10,
+        lot_id=99,
+        external_id="shared-file",
+        url="https://webapi.torgi.cdtrf.ru/Doc/public/file?DocId=x&FileId=y",
+        sha256="a" * 64,
+        text="Решение суда вступило в законную силу",
+        extracted_facts={
+            "facts": {
+                "has_judgment": True,
+                "evidence": {"has_judgment": {"snippet": "решение суда", "page": None}},
+            },
+            "source": "regex_text",
+        },
+        processing_status="completed",
+        downloaded_at=SimpleNamespace(),
+    )
+    target = Document(
+        id=11,
+        lot_id=100,
+        external_id="shared-file",
+        url="https://webapi.torgi.cdtrf.ru/Doc/public/file?DocId=x&FileId=y",
+        processing_status="pending",
+    )
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return iter(self.rows)
+
+        def scalar_one_or_none(self):
+            return None
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, _statement):
+            self.calls += 1
+            return Result([cached] if self.calls == 1 else [])
+
+    monkeypatch.setattr(
+        "src.workers.files_worker.adapter_for_document_url",
+        lambda _url: (_ for _ in ()).throw(AssertionError("download must not run")),
+    )
+    result = await process_file(target, target.lot_id, Session())
+
+    assert result is not None
+    assert target.processing_status == "completed"
+    assert target.sha256 == cached.sha256
+    assert target.text == cached.text
+    assert target.extracted_facts["reused_from_document_id"] == cached.id
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,12 @@ from sqlalchemy.orm import selectinload
 from src.config import get_settings
 from src.database import async_session_factory
 from src.models.entities import AlertState, ImportRun, Lot, SourceAlertState, Trade, UserFeedback
-from src.models.enums import AlertDeliveryStatus, LotClass, PriceScheduleStatus, TradeStatus
+from src.models.enums import (
+    PARTICIPABLE_TRADE_STATUSES,
+    AlertDeliveryStatus,
+    LotClass,
+    PriceScheduleStatus,
+)
 from src.telegram import fmt_lot_message, send_message
 
 logger = logging.getLogger(__name__)
@@ -327,15 +332,9 @@ def build_alert_candidates_stmt(now: datetime, limit: int, price_freshness_hours
         .where(Lot.price_observed_at >= now - timedelta(hours=price_freshness_hours))
         .where(Lot.score_updated_at.is_not(None))
         .where(Lot.score_updated_at >= Lot.updated_at)
-        .where(
-            Trade.status.in_(
-                [
-                    TradeStatus.ANNOUNCED.value,
-                    TradeStatus.APPLICATIONS_OPEN.value,
-                    TradeStatus.IN_PROGRESS.value,
-                ]
-            )
-        )
+        .where(Trade.status.in_(PARTICIPABLE_TRADE_STATUSES))
+        .where(Trade.applications_to.is_not(None))
+        .where(Trade.applications_to > now)
         .where(
             or_(
                 Lot.current_interval_from.is_(None),

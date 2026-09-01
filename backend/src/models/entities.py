@@ -107,6 +107,9 @@ class Trade(Base):
 
     applications_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     applications_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Source observation and fail-closed participation gate state.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    participation_exclusion_reason: Mapped[str | None] = mapped_column(String(50))
 
     payment_info: Mapped[str | None] = mapped_column(Text)
     sale_agreement_rules: Mapped[str | None] = mapped_column(Text)
@@ -137,6 +140,7 @@ class Trade(Base):
         Index("ix_trades_status", "status"),
         Index("ix_trades_etp_inn", "etp_inn"),
         Index("ix_trades_applications_to", "applications_to"),
+        Index("ix_trades_last_seen_at", "last_seen_at"),
     )
 
 
@@ -519,6 +523,7 @@ class Document(Base):
 
     kind: Mapped[str | None] = mapped_column(String(50))
     title: Mapped[str | None] = mapped_column(String(300))
+    external_id: Mapped[str | None] = mapped_column(String(200))
     url: Mapped[str | None] = mapped_column(String(1000))
     sha256: Mapped[str | None] = mapped_column(String(64))
     text: Mapped[str | None] = mapped_column(Text)
@@ -537,6 +542,7 @@ class Document(Base):
     )
 
     __table_args__ = (
+        Index("ix_documents_external_id", "external_id"),
         Index("ix_documents_retry_at", "next_retry_at"),
         Index("ix_documents_processing_retry", "processing_status", "next_retry_at"),
     )

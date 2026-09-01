@@ -7,14 +7,14 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
-from sqlalchemy import desc, func, or_, select, text
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -65,6 +65,66 @@ from src.version import VERSION
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _participation_clause(now: datetime):
+    """Return the single fail-closed predicate used by user-facing views."""
+    return and_(
+        Trade.status.in_(PARTICIPABLE_TRADE_STATUSES),
+        Trade.applications_to.is_not(None),
+        Trade.applications_to > now,
+    )
+
+
+def _review_clause(now: datetime):
+    """Return the conservative predicate for a manual-review candidate."""
+    return and_(
+        Lot.current_price.is_not(None),
+        Lot.price_schedule_status == PriceScheduleStatus.PARSED.value,
+        Lot.price_observed_at.is_not(None),
+        Lot.price_observed_at >= now - timedelta(hours=max(1, settings.price_freshness_hours)),
+        Lot.score_ev > 0,
+        func.coalesce(func.cardinality(Lot.score_stop_factors), 0) == 0,
+        Lot.score_updated_at.is_not(None),
+        Lot.score_updated_at >= Lot.updated_at,
+        or_(Lot.current_interval_from.is_(None), Lot.current_interval_from <= now),
+        or_(Lot.current_interval_to.is_(None), Lot.current_interval_to > now),
+    )
+
+
+def _ready_clause(now: datetime):
+    """Return the stricter recommendation predicate used by alerts."""
+    return and_(
+        Lot.score_class.in_([LotClass.A.value, LotClass.B.value]),
+        _review_clause(now),
+        func.coalesce(func.cardinality(Lot.score_gaps), 0) == 0,
+    )
+
+
+def _list_item_payload(lot: Lot) -> LotSchema:
+    """Serialize a lot and expose its participation/source summary inline."""
+    payload = LotSchema.model_validate(lot, from_attributes=True)
+    trade = getattr(lot, "trade", None)
+    if trade is None:
+        return payload
+    try:
+        payload.trade_status = TradeStatus(str(trade.status))
+    except ValueError:
+        payload.trade_status = None
+    payload.applications_from = trade.applications_from
+    payload.applications_to = trade.applications_to
+    payload.participation_exclusion_reason = trade.participation_exclusion_reason
+    refs = list(getattr(trade, "source_refs", []) or [])
+    if refs:
+        payload.source_name = refs[0].source
+        payload.source_url = refs[0].source_url
+    elif trade.efrsb_url:
+        payload.source_name = "efrsb_legacy"
+        payload.source_url = trade.efrsb_url
+    elif trade.etp_url:
+        payload.source_name = trade.etp_name or "etp"
+        payload.source_url = trade.etp_url
+    return payload
 
 
 @asynccontextmanager
@@ -215,16 +275,19 @@ async def list_lots(
     has_debtor: bool | None = None,
     has_court: bool | None = None,
     price_status: PriceScheduleStatus | None = None,
+    view: Literal["active", "review", "ready"] = "active",
     sort_by: Literal["ev", "price", "deadline", "updated"] = "ev",
     sort_order: Literal["asc", "desc"] = "desc",
 ) -> LotListSchema:
     """Лента лотов с фильтрацией."""
+    now = datetime.now(UTC)
     q = (
         select(Lot)
         .join(Trade, Lot.trade_id == Trade.id)
         .where(Lot.is_receivable == True)  # noqa: E712
-        .where(Trade.status.in_(PARTICIPABLE_TRADE_STATUSES))
+        .where(_participation_clause(now))
         .options(
+            selectinload(Lot.trade).selectinload(Trade.source_refs),
             selectinload(Lot.claims)
             .selectinload(Claim.debtor_party),
             selectinload(Lot.claims)
@@ -232,6 +295,11 @@ async def list_lots(
             selectinload(Lot.price_intervals),
         )
     )
+
+    if view == "review":
+        q = q.where(_review_clause(now))
+    elif view == "ready":
+        q = q.where(_ready_clause(now))
 
     if score_class:
         q = q.where(Lot.score_class == score_class.value)
@@ -268,7 +336,7 @@ async def list_lots(
     if deadline_before is not None:
         if deadline_before.tzinfo is None:
             raise HTTPException(status_code=422, detail="deadline_before must include a timezone")
-        q = q.where(Lot.current_interval_to <= deadline_before)
+        q = q.where(Trade.applications_to <= deadline_before)
 
     count_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(count_q)).scalar() or 0
@@ -276,7 +344,7 @@ async def list_lots(
     sort_column = {
         "ev": Lot.score_ev,
         "price": Lot.current_price,
-        "deadline": Lot.current_interval_to,
+        "deadline": Trade.applications_to,
         "updated": Lot.updated_at,
     }[sort_by]
     ordering = sort_column.asc() if sort_order == "asc" else sort_column.desc()
@@ -288,7 +356,7 @@ async def list_lots(
 
     pages = (total + page_size - 1) // page_size
     return LotListSchema(
-        items=[LotSchema.model_validate(lot, from_attributes=True) for lot in lots],
+        items=[_list_item_payload(lot) for lot in lots],
         total=total,
         page=page,
         page_size=page_size,
@@ -309,7 +377,15 @@ async def get_lot(
     """Карточка одного лота."""
     result = await db.execute(
         select(Lot)
+        .join(Trade, Lot.trade_id == Trade.id)
         .where(Lot.id == lot_id)
+        .where(
+            and_(
+                Trade.status.in_(PARTICIPABLE_TRADE_STATUSES),
+                Trade.applications_to.is_not(None),
+                Trade.applications_to > datetime.now(UTC),
+            )
+        )
         .options(
             selectinload(Lot.trade).selectinload(Trade.bankrupt_party),
             selectinload(Lot.trade).selectinload(Trade.source_refs),
@@ -449,6 +525,31 @@ async def apply_document_proposal(
     updates = proposal.get("updates") if isinstance(proposal, dict) else None
     if not isinstance(updates, dict):
         raise HTTPException(status_code=409, detail="Document has no fact proposal")
+    evidence = proposal.get("evidence") if isinstance(proposal, dict) else None
+    evidence = evidence if isinstance(evidence, dict) else {}
+    raw_claim_updates = updates.get("claim")
+    claim_updates: dict[str, object] = (
+        cast(dict[str, object], raw_claim_updates)
+        if isinstance(raw_claim_updates, dict)
+        else {}
+    )
+    critical_fields = {
+        "has_judgment",
+        "has_writ",
+        "secured",
+        "assignment_forbidden",
+        "counterclaim_risk",
+        "personal_claim",
+        "court_case_no",
+    }
+    missing_evidence = sorted(
+        field for field in claim_updates if field in critical_fields and not evidence.get(field)
+    )
+    if missing_evidence:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Critical proposal fields require evidence: {', '.join(missing_evidence)}",
+        )
     try:
         validated_updates = DocumentProposalUpdates.model_validate(updates)
     except ValidationError as exc:
@@ -525,6 +626,8 @@ async def get_stats(
 ) -> DashboardStats:
     """Дашборд — агрегированная статистика."""
 
+    now = datetime.now(UTC)
+
     counts = (
         await db.execute(
             select(
@@ -543,6 +646,55 @@ async def get_stats(
         )
     ).one()
 
+    active_lots = (
+        await db.scalar(
+            select(func.count(Lot.id))
+            .join(Trade, Lot.trade_id == Trade.id)
+            .where(Lot.is_receivable == True)  # noqa: E712
+            .where(_participation_clause(now))
+        )
+        or 0
+    )
+    review_candidates = (
+        await db.scalar(
+            select(func.count(Lot.id))
+            .join(Trade, Lot.trade_id == Trade.id)
+            .where(Lot.is_receivable == True)  # noqa: E712
+            .where(_participation_clause(now))
+            .where(_review_clause(now))
+        )
+        or 0
+    )
+    ready_recommendations = (
+        await db.scalar(
+            select(func.count(Lot.id))
+            .join(Trade, Lot.trade_id == Trade.id)
+            .where(Lot.is_receivable == True)  # noqa: E712
+            .where(_participation_clause(now))
+            .where(_ready_clause(now))
+        )
+        or 0
+    )
+    document_counts = (
+        await db.execute(
+            select(
+                func.count(Document.id),
+                func.count(Document.id).filter(
+                    Document.processing_status == "completed"
+                ),
+                func.count(Document.id).filter(
+                    Document.processing_status == "pending"
+                ),
+                func.count(Document.id).filter(
+                    Document.processing_status == "needs_review"
+                ),
+                func.count(Document.id).filter(
+                    Document.processing_status == "retrying"
+                ),
+            )
+        )
+    ).one()
+
     last_ingest = (
         await db.execute(
             select(func.max(ImportRun.finished_at)).where(
@@ -551,6 +703,15 @@ async def get_stats(
             )
         )
     ).scalar()
+    source_status = (
+        await db.scalar(
+            select(ImportRun.status)
+            .where(ImportRun.source == settings.primary_ingest_source)
+            .order_by(ImportRun.started_at.desc())
+            .limit(1)
+        )
+        or "unknown"
+    )
     alerts_sent_today = (
         await db.execute(
             select(func.count(AlertState.id)).where(
@@ -571,6 +732,16 @@ async def get_stats(
         stale_scored_lots=counts[7],
         alerts_sent_today=alerts_sent_today,
         last_ingest_at=last_ingest,
+        source_status=str(source_status),
+        active_lots=int(active_lots),
+        excluded_lots=max(0, int(counts[1]) - int(active_lots)),
+        ready_recommendations=int(ready_recommendations),
+        review_candidates=int(review_candidates),
+        documents_total=int(document_counts[0]),
+        documents_completed=int(document_counts[1]),
+        documents_pending=int(document_counts[2]),
+        documents_needs_review=int(document_counts[3]),
+        documents_retrying=int(document_counts[4]),
     )
 
 

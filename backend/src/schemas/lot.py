@@ -125,6 +125,16 @@ class LotSchema(BaseModel):
     price_observed_at: datetime | None = None
     price_source: str | None = None
 
+    # Flattened trade fields used by the paginated list. The detail endpoint
+    # keeps the complete ``trade`` object below, while list rows should not
+    # need a second request just to show participation data.
+    trade_status: TradeStatus | None = None
+    applications_from: datetime | None = None
+    applications_to: datetime | None = None
+    source_name: str | None = None
+    source_url: str | None = None
+    participation_exclusion_reason: str | None = None
+
     price_intervals: list[PriceIntervalSchema] = Field(default_factory=list)
     claims: list[ClaimSchema] = Field(default_factory=list)
 
@@ -194,6 +204,7 @@ class DocumentSchema(BaseModel):
     id: int
     kind: str | None = None
     title: str | None = None
+    external_id: str | None = None
     url: str | None = None
     downloaded_at: datetime | None = None
     text: str | None = None
@@ -272,6 +283,16 @@ class DashboardStats(BaseModel):
     alerts_sent_today: int
     stale_scored_lots: int = 0
     last_ingest_at: datetime | None = None
+    source_status: str = "unknown"
+    active_lots: int = 0
+    excluded_lots: int = 0
+    ready_recommendations: int = 0
+    review_candidates: int = 0
+    documents_total: int = 0
+    documents_completed: int = 0
+    documents_pending: int = 0
+    documents_needs_review: int = 0
+    documents_retrying: int = 0
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────

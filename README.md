@@ -44,7 +44,7 @@
    | `EFRSB_REST_ENABLED` | договорной REST ЕФРСБ; по умолчанию выключен |
    | `EFRSB_REST_CONTRACT_CONFIRMED` | обязательное явное подтверждение договора перед REST-вызовами |
    | `INGEST_SOURCES` | источники первичного импорта через запятую; по умолчанию `cdt`, опционально `cdt,efrsb` |
-   | `CDT_INGEST_MAX_ITEMS` | лимит карточек ЦДТ за один запуск; по умолчанию `250` |
+   | `CDT_INGEST_MAX_ITEMS` | аварийный лимит карточек ЦДТ; `0` (по умолчанию) сканирует все страницы |
 
 6. **Settings → Networking → Generate Domain** — получите публичный URL.
 7. Пуш в `main` → авто-редеплой.
@@ -85,6 +85,9 @@ npm run dev            # http://localhost:5173 (проксирует /api на :
 
 # Полный smoke-тест Docker + PostgreSQL + API:
 pwsh ./scripts/smoke.ps1
+
+# Один воспроизводимый прототипный цикл (Docker, ingest, состояние и review-top10):
+pwsh ./scripts/prototype.ps1
 ```
 
 ## Доменная модель
@@ -152,6 +155,7 @@ ar-radar health    # проверка конфига
 ar-radar ingest    # однократный ingest настроенных источников
 ar-radar enrich    # обогатить дебиторов
 ar-radar score     # пересчитать скоринг
+ar-radar prototype-run  # bounded end-to-end цикл и JSON-отчёт
 ar-radar init-db   # создать таблицы (dev, без alembic)
 ```
 
@@ -172,11 +176,11 @@ ar-radar init-db   # создать таблицы (dev, без alembic)
 | `/api/v1/feedback/calibration` | GET | Отчёт по исходам взыскания и ошибке EV; до минимальной выборки статус `insufficient_data` |
 | `/docs` | GET | Swagger UI |
 
-Фильтры `/api/v1/lots`: `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before`, `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`. Сортировка: `sort_by=ev|price|deadline|updated` и `sort_order=asc|desc`.
+Фильтры `/api/v1/lots`: `view=active|review|ready`, `score_class` (A/B/C/D), `min_ev`/`max_ev`, `debtor_inn`, `search`, `trade_status`, `deadline_before` (срок подачи заявки), `etp_name`, `has_debtor`, `has_court`, `price_status`, `page`/`page_size`. Сортировка: `sort_by=ev|price|deadline|updated` и `sort_order=asc|desc`. В строке лота возвращаются статус торгов, `applications_to`, источник и URL.
 
 ## Telegram-алерты
 
-При заполненных `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS` alert-воркер раз в 30 минут проверяет лоты класса A/B с EV > 0 и шлёт в Telegram. Дедупликация хранится в `alerts_state` отдельно для каждого получателя; лоты с будущим интервалом, стоп-фактором или последним действием `reject`/`bought` не отправляются. Внешнему Telegram API передаются финансовые показатели лота, без имени и ИНН дебитора.
+При заполненных `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_IDS` alert-воркер раз в 30 минут проверяет лоты класса A/B с EV > 0 и без gaps и шлёт в Telegram. Дедупликация хранится в `alerts_state` отдельно для каждого получателя; лоты с будущим интервалом, стоп-фактором или последним действием `reject`/`bought` не отправляются. Внешнему Telegram API передаются финансовые показатели лота, без имени и ИНН дебитора. Интерактивный `/review` показывает отдельную очередь кандидатов для ручной проверки и не является рекомендацией к покупке.
 
 Интерактивный бот (`/top`, `/start`) — опциональный отдельный сервис из `bot/` (можно задеплоить вторым сервисом с тем же репо, root `bot/Dockerfile`).
 

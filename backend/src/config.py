@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     # added back with INGEST_SOURCES=cdt,efrsb when its public route works.
     ingest_sources: str = "cdt"
     cdt_api_url: str = "https://webapi.torgi.cdtrf.ru"
-    cdt_ingest_max_items: int = 250
+    # Zero means scan every page selected by ``ingest_max_pages``. A positive
+    # value remains available as an explicit emergency cap, but is not the
+    # default because truncating before detail filtering loses active lots.
+    cdt_ingest_max_items: int = 0
     cdt_detail_concurrency: int = 4
     # Official FNS EGRUL extract is free but slower than the search card.
     # Keep it enabled for risk flags, with a bounded polling window.
@@ -108,6 +111,10 @@ class Settings(BaseSettings):
     enrich_max_attempts: int = 8
     etp_max_attempts: int = 8
     document_max_attempts: int = 8
+    files_batch_size: int = 20
+    files_document_timeout_seconds: int = 120
+    files_batch_timeout_seconds: int = 300
+    prototype_files_cycles: int = 10
     price_freshness_hours: int = 24
 
     # Data retention is deliberately disabled by default.  Set a positive
